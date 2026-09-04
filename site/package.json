@@ -1,0 +1,8 @@
+{
+  "name": "gpt6astra-watch-site",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test test_worker.mjs test_view_modes.mjs"
+  }
+}

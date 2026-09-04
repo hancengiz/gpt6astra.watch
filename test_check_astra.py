@@ -2,6 +2,7 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import MagicMock, patch
 
 import check_astra
 
@@ -156,6 +157,69 @@ class AstraWatchTests(unittest.TestCase):
 
         self.assertIsNone(result)
 
+    def test_successful_absent_check_sends_waiting_after_heartbeat(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            args = check_astra.parse_args([
+                "--force",
+                "--share-country", "UA",
+                "--state-file", str(Path(temporary_directory) / "state.json"),
+            ])
+            fake_context = MagicMock()
+            fake_context.__enter__.return_value = object()
+            with (
+                patch.object(check_astra, "resolve_codex_binary", return_value="codex"),
+                patch.object(check_astra, "AppServerClient", return_value=fake_context),
+                patch.object(check_astra, "list_picker_models", return_value=[]),
+                patch.object(check_astra, "send_watcher_event", return_value={"ok": True}) as send,
+                patch.object(check_astra, "print_result"),
+            ):
+                result = check_astra.check_once(args)
+
+        self.assertEqual(0, result)
+        self.assertEqual(["heartbeat", "waiting"], [call.args[2] for call in send.call_args_list])
+
+    def test_failed_check_never_sends_waiting(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            args = check_astra.parse_args([
+                "--force",
+                "--share-country", "UA",
+                "--state-file", str(Path(temporary_directory) / "state.json"),
+            ])
+            with (
+                patch.object(
+                    check_astra, "resolve_codex_binary",
+                    side_effect=check_astra.WatcherError("catalog unavailable"),
+                ),
+                patch.object(check_astra, "send_watcher_event", return_value={"ok": True}) as send,
+                patch.object(check_astra, "print_result"),
+            ):
+                result = check_astra.check_once(args)
+
+        self.assertEqual(1, result)
+        self.assertEqual(["heartbeat"], [call.args[2] for call in send.call_args_list])
+
+    def test_no_notify_smoke_check_suppresses_waiting_signal(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            args = check_astra.parse_args([
+                "--force",
+                "--no-notify",
+                "--share-country", "UA",
+                "--state-file", str(Path(temporary_directory) / "state.json"),
+            ])
+            fake_context = MagicMock()
+            fake_context.__enter__.return_value = object()
+            with (
+                patch.object(check_astra, "resolve_codex_binary", return_value="codex"),
+                patch.object(check_astra, "AppServerClient", return_value=fake_context),
+                patch.object(check_astra, "list_picker_models", return_value=[]),
+                patch.object(check_astra, "send_watcher_event") as send,
+                patch.object(check_astra, "print_result"),
+            ):
+                result = check_astra.check_once(args)
+
+        self.assertEqual(0, result)
+        send.assert_not_called()
+
     def test_private_funnel_does_not_multiply_skill_requests_by_installations(self):
         import sqlite3
 
@@ -221,6 +285,130 @@ class AstraWatchTests(unittest.TestCase):
         ).fetchall()
         self.assertEqual(before, after)
         self.assertEqual([("shared-ip", "TR")], claims)
+
+    def test_waiting_vote_migration_is_additive_and_idempotent(self):
+        import sqlite3
+
+        database = sqlite3.connect(":memory:")
+        database.executescript(
+            """
+            CREATE TABLE reports (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              country TEXT NOT NULL,
+              source TEXT NOT NULL,
+              ip_hash TEXT NOT NULL,
+              undo_hash TEXT,
+              created_at INTEGER NOT NULL
+            );
+            CREATE TABLE report_claims (
+              ip_hash TEXT NOT NULL,
+              country TEXT NOT NULL,
+              created_at INTEGER NOT NULL,
+              PRIMARY KEY (ip_hash, country)
+            );
+            CREATE TABLE watchers (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              country TEXT NOT NULL,
+              watcher_hash TEXT,
+              ip_hash TEXT NOT NULL,
+              created_at INTEGER NOT NULL
+            );
+            CREATE TABLE skill_requests (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              country TEXT NOT NULL,
+              ip_hash TEXT NOT NULL,
+              first_requested_at INTEGER NOT NULL,
+              last_requested_at INTEGER NOT NULL,
+              request_count INTEGER NOT NULL
+            );
+            INSERT INTO reports
+              (country, source, ip_hash, undo_hash, created_at)
+              VALUES ('TR', 'web', 'report-ip', 'undo-hash', 10);
+            INSERT INTO report_claims (ip_hash, country, created_at)
+              VALUES ('report-ip', 'TR', 10);
+            INSERT INTO watchers (country, watcher_hash, ip_hash, created_at)
+              VALUES ('DE', 'watcher-hash', 'watcher-ip', 20);
+            INSERT INTO skill_requests
+              (country, ip_hash, first_requested_at, last_requested_at, request_count)
+              VALUES ('GB', 'skill-ip', 30, 40, 2);
+            """
+        )
+        tables = ("reports", "report_claims", "watchers", "skill_requests")
+        before = {
+            table: database.execute(f"SELECT * FROM {table}").fetchall()
+            for table in tables
+        }
+        migration = (
+            Path(__file__).parent / "site" / "migrations" / "0004_waiting_votes.sql"
+        ).read_text()
+
+        database.executescript(migration)
+        database.executescript(migration)
+
+        after = {
+            table: database.execute(f"SELECT * FROM {table}").fetchall()
+            for table in tables
+        }
+        self.assertEqual(before, after)
+        self.assertEqual(
+            "waiting_votes",
+            database.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='waiting_votes'"
+            ).fetchone()[0],
+        )
+
+    def test_watcher_waiting_migration_preserves_existing_rows(self):
+        import sqlite3
+
+        database = sqlite3.connect(":memory:")
+        database.executescript(
+            """
+            CREATE TABLE watchers (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              country TEXT NOT NULL,
+              watcher_hash TEXT NOT NULL,
+              ip_hash TEXT NOT NULL,
+              mode TEXT NOT NULL CHECK (mode IN ('account','region')),
+              started_at INTEGER NOT NULL,
+              last_seen_at INTEGER NOT NULL,
+              completed_at INTEGER,
+              access_detected_at INTEGER,
+              completion_reason TEXT,
+              created_at INTEGER NOT NULL
+            );
+            INSERT INTO watchers (
+              country, watcher_hash, ip_hash, mode, started_at, last_seen_at,
+              completed_at, access_detected_at, completion_reason, created_at
+            ) VALUES ('UA', 'existing-watcher', 'existing-ip', 'account',
+                      10, 20, NULL, NULL, NULL, 10);
+            """
+        )
+        before = database.execute(
+            "SELECT id, country, watcher_hash, ip_hash, mode, started_at, "
+            "last_seen_at, completed_at, access_detected_at, completion_reason, created_at "
+            "FROM watchers"
+        ).fetchall()
+
+        migration = (
+            Path(__file__).parent / "site" / "migrations" / "0005_watcher_waiting.sql"
+        ).read_text()
+        database.executescript(migration)
+
+        after = database.execute(
+            "SELECT id, country, watcher_hash, ip_hash, mode, started_at, "
+            "last_seen_at, completed_at, access_detected_at, completion_reason, created_at "
+            "FROM watchers"
+        ).fetchall()
+        added = database.execute(
+            "SELECT last_waiting_at, response_hash FROM watchers"
+        ).fetchone()
+        index = database.execute(
+            "SELECT name FROM sqlite_master WHERE type='index' AND name='idx_watchers_waiting'"
+        ).fetchone()
+
+        self.assertEqual(before, after)
+        self.assertEqual((None, None), added)
+        self.assertEqual(("idx_watchers_waiting",), index)
 
 if __name__ == "__main__":
     unittest.main()

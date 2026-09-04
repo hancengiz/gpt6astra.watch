@@ -515,6 +515,15 @@ def check_once(args: argparse.Namespace) -> int:
     if not available:
         state["last_status"] = "absent"
         state["available_since"] = None
+        waiting_signal = None
+        if args.share_country and not args.no_notify:
+            waiting_signal = send_watcher_event(
+                args.share_country,
+                watcher_id,
+                "waiting",
+                args.watcher_url,
+                min(args.timeout, 15.0),
+            )
         save_state(state_path, state)
         print_result(
             {
@@ -523,6 +532,7 @@ def check_once(args: argparse.Namespace) -> int:
                 "checked_at": checked_at,
                 "picker_models_seen": len(models),
                 "monitoring_signal": monitoring_signal,
+                "waiting_signal": waiting_signal,
             }
         )
         return 0
@@ -613,7 +623,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--no-notify",
         action="store_true",
-        help="do not send desktop notifications",
+        help="do not send desktop notifications or watcher signals",
     )
     parser.add_argument(
         "--test-notification",
@@ -625,7 +635,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         type=country_argument,
         metavar="CC",
         help="after explicit consent, anonymously share active-monitoring heartbeats "
-        "and the access timestamp for this ISO 3166-1 alpha-2 country",
+        "plus successful waiting checks and the access timestamp for this "
+        "ISO 3166-1 alpha-2 country",
     )
     parser.add_argument(
         "--watcher-url",

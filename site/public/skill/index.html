@@ -47,8 +47,8 @@
   <a class="back" href="/">← back to the sky</a>
   <h1>Let your agent <em>watch the sky</em> for you.</h1>
   <p class="lede">No accounts, no apps. Hand the personalized skill file to any coding agent —
-  Claude Code, Codex, Cursor, whatever reads instructions — and it detects your country, asks for
-  consent, then installs a scheduled watcher that pings you the moment GPT-6&nbsp;Astra lands.</p>
+  Claude Code, Codex, Cursor, whatever reads instructions — and it asks you to confirm your country,
+  asks for consent, then installs a scheduled watcher that pings you the moment GPT-6&nbsp;Astra lands.</p>
 
   <div class="steps">
     <div class="step">
@@ -57,10 +57,15 @@
       <p>Paste it into your agent chat.</p>
       <div class="copyblock">
         <button class="copybtn" type="button" data-copy="prompt">copy</button>
-        <pre id="prompt">Install the astra-watch skill from https://gpt6astra.watch/SKILL.md
-and set up a scheduled watcher that notifies me when GPT-6 Astra
-becomes available on my account. Tell me the country detected in the
-skill response and ask me yes or no before installing anything.</pre>
+        <pre id="prompt">Read the astra-watch skill at:
+https://gpt6astra.watch/SKILL.md
+
+If direct opening is blocked, fetch it read-only with curl. Never infer
+my country from your network, timezone, language, or account locale.
+Ask me to confirm my country, then ask me yes or no for sharing consent
+before installing, downloading, or scheduling anything. If the skill
+cannot be retrieved, stop, say “Country not detected,” ask for my
+country, and ask me to paste SKILL.md.</pre>
       </div>
     </div>
 
@@ -78,8 +83,8 @@ skill response and ask me yes or no before installing anything.</pre>
       <div class="n">what happens</div>
       <h3>Your agent will</h3>
       <p>
-        Detect your country in the initial skill response and ask one explicit yes/no privacy
-        question before installing anything · pick the best watcher for your setup
+        Ask you to confirm your country and then ask one explicit yes/no privacy question before
+        installing anything · never trust an AI relay, VPN, or timezone as your country · pick the best watcher for your setup
         (Codex account ground-truth if available, otherwise the crowd-status watcher) ·
         schedule it every 10 minutes — systemd on Linux, launchd on macOS,
         Task Scheduler on Windows · fire a desktop notification when Astra lands.
@@ -89,9 +94,11 @@ skill response and ask me yes or no before installing anything.</pre>
     <div class="step">
       <div class="n">privacy</div>
       <h3>What leaves your machine</h3>
-      <p>Fetching SKILL.md records country, timestamp, and a salted one-way IP hash for private,
+      <p>Fetching SKILL.md records request-network country, timestamp, and a salted one-way IP hash for private,
       unpublished funnel analytics. If you consent, the watcher also sends a random installation
-      ID, heartbeat times, and its access/completion time. The server stores identifiers only as
+      ID, heartbeat times, successful still-waiting confirmations, and its access/completion time.
+      Those verified waiting confirmations join the website's waiting total and disappear after missed
+      checks or when access arrives. The server stores identifiers only as
       salted one-way hashes — never an account name, hostname, or raw IP.
       Everything is open source: <a href="https://github.com/hancengiz/gpt6astra.watch">github.com/hancengiz/gpt6astra.watch</a></p>
     </div>

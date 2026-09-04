@@ -3,10 +3,12 @@
 Astra Watch has two parts:
 
 - **[gpt6astra.watch](https://gpt6astra.watch)** — a crowd-watched cosmic
-  rollout map. People light up their country when GPT-6 Astra lands; active
-  anonymous watchers appear in the public monitoring counter. The served
-  [`SKILL.md`](site/public/SKILL.md) injects the request country so an agent can
-  confirm it and ask one yes/no consent question before installing anything.
+  rollout map. People can say they are still waiting, then convert that same
+  vote when GPT-6 Astra lands; active anonymous watchers appear in the public
+  monitoring counter. The served
+  [`SKILL.md`](site/public/SKILL.md) labels the request-network country only as
+  an unconfirmed hint, requires the person to confirm their real country, and
+  then asks one yes/no consent question before installing anything.
 - **`check_astra.py`** — a ground-truth local checker for the currently
   signed-in Codex account. It sends one desktop notification when
   `gpt-6-astra` becomes picker-visible.
@@ -19,11 +21,22 @@ its documented `model/list` method.
 
 ### 2026-09-04
 
+- Added reversible **I don't have Astra yet** votes. The reporting browser can
+  later convert its waiting vote into a positive report without creating a
+  second identity; waiting votes never light a country or enter the live feed.
+- Made the complete 249-country ISO catalog plus Kosovo available to the map,
+  including valid countries absent from the coarse map geometry. When edge
+  detection is unavailable, the UI shows **Country not detected** and requires
+  an explicit selection; browser timezone is never used as country authority.
+- Added map views for all activity, manual **I got Astra** reports,
+  **Desperately waiting** responses, and skill/script signals. The waiting view
+  replaces rollout stars with animated sad-face markers sized by waiting count.
 - Added consented watcher heartbeats, a public active-monitoring count, separate
   account-access and country-level completion events, and anonymous wait-time
   statistics.
-- Personalized the served `SKILL.md` with Cloudflare's request country and
-  required an explicit yes/no privacy answer before installing anything.
+- Personalized the served `SKILL.md` with an unconfirmed Cloudflare
+  request-network hint, then required explicit country confirmation and a
+  yes/no privacy answer before installing anything.
 - Added private D1 funnel analytics from unique skill requests through watcher
   installation and access, using only salted one-way identifiers.
 - Added a descriptive watcher User-Agent for Cloudflare compatibility and
@@ -63,7 +76,10 @@ preventing duplicate alerts. Authentication or network failures are never
 treated as evidence that the model is unavailable. After three consecutive
 failures, the watcher sends one health notification. With explicit consent,
 `--share-country CC` sends a stable anonymous heartbeat on each scheduled run
-and one idempotent access event when Astra appears.
+and a still-waiting confirmation only after a successful absent result. These
+temporary confirmations join the website waiting total without lighting a
+country. One idempotent access event removes the watcher from waiting when
+Astra appears. Errors never count as waiting.
 
 ## User systemd timer
 
@@ -100,8 +116,12 @@ again. Desktop notifications require an active graphical session.
 
 The complete deployment output lives in `site/public/`:
 
-- `index.html`, `style.css`, `app.js` — the cosmic map, active-monitoring
-  counter, ticker, country panel, and reporting flow.
+- `index.html`, `style.css`, `app.js` — the cosmic map, report-view filters,
+  waiting/sad-face and active-monitoring visuals, ticker, country panel, and
+  vote-conversion flow.
+- `crimea.js` — request-location normalization and the Ukraine-owned Crimea and
+  Sevastopol map overlay, derived from geoBoundaries gbOpen UKR ADM1 at pinned
+  commit `9469f09` (OpenStreetMap contributors, ODbL 1.0).
 - `_worker.js` — Pages advanced-mode Worker for `/api/*` plus the personalized
   `/SKILL.md` response.
 - `SKILL.md` and `skill/` — raw agent instructions plus the human-facing
@@ -109,21 +129,28 @@ The complete deployment output lives in `site/public/`:
 - `scripts/check_astra.py` — the downloadable copy of the local checker. Keep
   it byte-for-byte in sync with the root `check_astra.py`.
 
-The API stores reports and consented anonymous watcher sessions in D1. A
-watcher counts as active for 25 minutes after its latest heartbeat and stops
+The API stores positive reports, waiting votes, and consented anonymous watcher
+sessions in D1. A watcher counts as active for 25 minutes after its latest
+heartbeat and stops
 counting when it sends an access or country-completion event. Start and
 completion times preserve anonymous wait-duration statistics. Three distinct
 web reporters or two distinct account-access signals mark a country as lit.
 The map can filter to skill/script signals only. D1 permits one active manual
-report per salted IP hash and country. Its reporting browser receives a secure,
-HTTP-only undo token; only that token can remove the exact web report.
-Legacy reports remain untouched by migration. From the same network, repeating
-the report once claims the existing IP/country record for same-browser undo
-without creating another report.
+response per salted IP hash and country. Its browser receives a secure,
+HTTP-only ownership token. That browser can change a waiting vote to an access
+report even after its IP changes, correct it back to waiting, or remove it.
+Manual and fresh account-watcher waiting confirmations share one deduplicated
+total per network and country. Waiting responses remain separate from the
+positive report ledger and never affect country rollout thresholds. Legacy
+reports remain untouched by migrations.
+From the same network, repeating a pre-undo legacy report once claims the
+existing IP/country record for same-browser management without duplication.
 
-Every `/SKILL.md` GET also records country, first/last request time, request
-count, and a salted one-way IP hash for private funnel analytics. The public
-API never returns these analytics. Administrators can query the D1-only view:
+Every `/SKILL.md` GET also records request-network country, first/last request
+time, request count, and a salted one-way IP hash for private funnel analytics.
+That network location may belong to an AI relay or VPN and is never treated as
+the user's confirmed country. The public API never returns these analytics.
+Administrators can query the D1-only view:
 
 ```bash
 cd site
@@ -170,6 +197,10 @@ npx wrangler d1 execute astra-watch \
   --file migrations/0002_active_monitoring.sql --remote
 npx wrangler d1 execute astra-watch \
   --file migrations/0003_report_undo.sql --remote
+npx wrangler d1 execute astra-watch \
+  --file migrations/0004_waiting_votes.sql --remote
+npx wrangler d1 execute astra-watch \
+  --file migrations/0005_watcher_waiting.sql --remote
 ```
 
 

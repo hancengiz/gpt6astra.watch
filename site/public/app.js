@@ -1,6 +1,8 @@
 // gpt6astra.watch — cosmic map app
 import { geoNaturalEarth1, geoPath, geoCentroid, geoGraticule10 } from "./assets/vendor/d3-geo.esm.js";
 import { feature } from "./assets/vendor/topojson-client.esm.js";
+import { CRIMEA_UKRAINE_FEATURE } from "./crimea.js";
+import { statusForView, totalsForView, VIEW_MODES } from "./view_modes.js";
 
 /* ---------------------------------------------------------------- data */
 
@@ -57,8 +59,8 @@ const NAME_FIXES = {
   "eSwatini": "Eswatini",
 };
 
-// IANA timezone → ISO alpha-2 (common zones; detection is a convenience, the
-// map click is the explicit source of truth).
+// Legacy IANA timezone reference. It is intentionally not used for country
+// attribution because timezone is not a reliable country signal.
 const TZ_TO_COUNTRY = {
   "Europe/Amsterdam":"NL","Europe/Andorra":"AD","Europe/Athens":"GR","Europe/Belgrade":"RS",
   "Europe/Berlin":"DE","Europe/Bratislava":"SK","Europe/Brussels":"BE","Europe/Bucharest":"RO",
@@ -174,17 +176,6 @@ const relTime = (ts) => {
   return `${Math.floor(s / 86400)}d ago`;
 };
 
-const detectCountry = () => {
-  try {
-    const tz = Intl.DateTimeFormat().resolvedOptions().timeZone || "";
-    if (TZ_TO_COUNTRY[tz]) return TZ_TO_COUNTRY[tz];
-    for (const prefix of ["America/Argentina/", "America/Indiana/", "America/Kentucky/", "America/North_Dakota/"]) {
-      if (tz.startsWith(prefix)) return { "America/Argentina/": "AR" }[prefix] || "US";
-    }
-  } catch { /* ignore */ }
-  return null;
-};
-
 const toast = (msg, ms = 3200) => {
   const t = $("#toast");
   t.textContent = msg;
@@ -240,18 +231,31 @@ else requestAnimationFrame(starLoop);
 
 /* ---------------------------------------------------------------- state */
 
-const initialCountry = detectCountry();
+// Country attribution must come from the request edge or an explicit user
+// choice. Browser timezone is deliberately not used because it can silently
+// assign the wrong country when a timezone spans borders or a user is traveling.
+const initialCountry = null;
+const savedViewMode = localStorage.getItem("astra-view-mode");
+const initialViewMode = VIEW_MODES.has(savedViewMode)
+  ? savedViewMode
+  : (localStorage.getItem("astra-script-only") === "1" ? "script" : "all");
 
 const state = {
   countries: [],        // [{iso, name, feature, centroid, d}]
+  countryOptions: [],   // complete server-authoritative country catalog
   byIso: new Map(),
-  summary: { countries: {}, totals: { lit: 0, reported: 0, rumored: 0, reports: 0, monitoring: 0 } },
+  summary: { countries: {}, totals: {
+    lit: 0, reported: 0, rumored: 0, reports: 0,
+    waiting: 0, waiting_web: 0, waiting_watcher: 0, monitoring: 0,
+  } },
   selected: null,
   myCountry: initialCountry,
   detectedCountry: initialCountry,
   lastFeedId: 0,
   tickEvents: [],       // [{type:'report'|'lit', cc, name, ts}]
-  scriptOnly: localStorage.getItem("astra-script-only") === "1",
+  votes: new Map(),     // server-authoritative per-country browser vote state
+  voteRequests: new Map(),
+  viewMode: initialViewMode,
   pathGen: null,
   projection: null,
 };
@@ -266,6 +270,7 @@ const constellationEl = el("path", { class: "constellation" });
 const gStars = el("g", { id: "g-stars" });
 const gBursts = el("g", { id: "g-bursts" });
 svg.append(gGrat, outline, gCountries, constellationEl, gStars, gBursts);
+const crimeaOverlay = { feature: CRIMEA_UKRAINE_FEATURE, node: null };
 
 const STAR_PATH = "M0,-7 C1,-2 2,-1 7,0 C2,1 1,2 0,7 C-1,2 -2,1 -7,0 C-2,-1 -1,-2 0,-7 Z";
 
@@ -289,6 +294,7 @@ function layoutMap() {
     c.xy = projection(geoCentroid(c.feature));
     if (c.node) c.node.setAttribute("d", c.d || "");
   }
+  crimeaOverlay.node?.setAttribute("d", pathGen(crimeaOverlay.feature) || "");
   renderStars();
   renderConstellation();
 }
@@ -320,6 +326,54 @@ async function loadWorld() {
     c.node = node;
     gCountries.append(node);
   }
+
+  const crimeaNode = el("path", {
+    class: "country crimea-ukraine",
+    "data-iso": "UA",
+    d: "",
+  });
+  const title = document.createElementNS(svgNS, "title");
+  title.textContent = "Crimea and Sevastopol — Ukraine (UA)";
+  crimeaNode.append(title);
+  crimeaNode.addEventListener("click", () => selectCountry("UA"));
+  crimeaOverlay.node = crimeaNode;
+  // Appending last makes the Ukraine-owned overlay authoritative over the
+  // older Natural Earth world shape, which assigns these areas to Russia.
+  gCountries.append(crimeaNode);
+}
+
+async function loadCountryOptions() {
+  try {
+    const response = await fetch("/api/countries", { cache: "no-store" });
+    if (!response.ok) throw new Error("country catalog unavailable");
+    const data = await response.json();
+    if (!Array.isArray(data.countries) || !data.countries.length) {
+      throw new Error("country catalog empty");
+    }
+
+    state.countryOptions = data.countries
+      .filter((country) => /^[A-Z]{2}$/.test(country.code) && country.name)
+      .map((country) => {
+        const mapped = state.byIso.get(country.code);
+        if (mapped) {
+          mapped.name = country.name;
+          return mapped;
+        }
+        const option = {
+          iso: country.code,
+          name: country.name,
+          feature: null,
+          node: null,
+          xy: null,
+        };
+        state.byIso.set(country.code, option);
+        return option;
+      });
+  } catch {
+    // The map remains usable if the catalog request fails, but no location is
+    // guessed. A valid server catalog is required to expose mapless regions.
+    state.countryOptions = [...state.byIso.values()];
+  }
 }
 
 async function refineDetectedCountry() {
@@ -332,21 +386,21 @@ async function refineDetectedCountry() {
       state.myCountry = data.country;
     }
   } catch {
-    // Timezone detection remains the offline fallback.
+    // Leave the country undetected so the user must choose explicitly.
   }
 }
 
 function statusFromCountry(data) {
-  if (!data) return "none";
-  if (!state.scriptOnly) return data.status || "none";
-  const watcherReports = data.watcher ?? 0;
-  if (watcherReports >= 2) return "live";
-  if (watcherReports === 1) return "rumored";
-  return "none";
+  return statusForView(data, state.viewMode);
 }
 
 function statusOf(iso) {
   return statusFromCountry(state.summary.countries[iso]);
+}
+
+function countryNodes(iso) {
+  const primary = state.byIso.get(iso)?.node;
+  return [primary, ...(iso === "UA" ? [crimeaOverlay.node] : [])].filter(Boolean);
 }
 
 function paintCountries() {
@@ -354,24 +408,61 @@ function paintCountries() {
     if (!c.iso || !c.node) continue;
     const data = state.summary.countries[c.iso] || {};
     const status = statusOf(c.iso);
-    c.node.classList.remove("rumored", "reported", "live", "self-reported", "script-reported");
-    if (status !== "none") {
-      c.node.classList.add(status);
-    } else {
-      c.node.classList.remove("ignite");
-    }
-    if (status !== "none" && status !== "live" &&
-        (data.watcher ?? 0) > 0 && (state.scriptOnly || !(data.web ?? 0))) {
-      c.node.classList.add("script-reported");
-    } else if (status !== "none" && status !== "live" &&
-               (data.web ?? 0) > 0 && !(data.watcher ?? 0)) {
-      c.node.classList.add("self-reported");
+    for (const node of countryNodes(c.iso)) {
+      node.classList.remove(
+        "waiting", "waiting-focus", "rumored", "reported", "live",
+        "self-reported", "script-reported"
+      );
+      if (state.viewMode === "waiting") {
+        if ((data.waiting ?? 0) > 0) node.classList.add("waiting", "waiting-focus");
+        else node.classList.remove("ignite");
+      } else if (status !== "none") {
+        node.classList.add(status);
+      } else if (state.viewMode === "all" && (data.waiting ?? 0) > 0) {
+        node.classList.add("waiting");
+      } else {
+        node.classList.remove("ignite");
+      }
+      if (status !== "none" && status !== "live" &&
+          (data.watcher ?? 0) > 0 && (state.viewMode === "script" || !(data.web ?? 0))) {
+        node.classList.add("script-reported");
+      } else if (status !== "none" && status !== "live" &&
+                 (data.web ?? 0) > 0 && (state.viewMode === "got" || !(data.watcher ?? 0))) {
+        node.classList.add("self-reported");
+      }
     }
   }
 }
 
 function renderStars() {
   gStars.replaceChildren();
+  if (state.viewMode === "waiting") {
+    for (const c of state.countries) {
+      const waiting = state.summary.countries[c.iso]?.waiting ?? 0;
+      if (!c.iso || !c.xy || waiting < 1) continue;
+      const scale = 0.9 + Math.min(0.7, Math.log2(waiting + 1) * 0.18);
+      const marker = el("g", {
+        class: "sad-marker",
+        transform: `translate(${c.xy[0]},${c.xy[1]}) scale(${scale})`,
+      });
+      const title = el("title");
+      title.textContent = `${c.name}: ${waiting.toLocaleString()} desperately waiting`;
+      marker.append(
+        title,
+        el("circle", { class: "sad-face", cx: 0, cy: 0, r: 8.5 }),
+        el("circle", { class: "sad-eye", cx: -3, cy: -2, r: 1 }),
+        el("circle", { class: "sad-eye", cx: 3, cy: -2, r: 1 }),
+        el("path", { class: "sad-mouth", d: "M-4,4 Q0,0 4,4" }),
+        el("path", {
+          class: "sad-tear",
+          d: "M4,-0.5 C6,1.8 6,3.8 4,4.8 C2,4 2,1.8 4,-0.5 Z",
+        }),
+      );
+      marker.style.animationDelay = `${(c.iso.charCodeAt(0) + c.iso.charCodeAt(1)) % 17 / 10}s`;
+      gStars.append(marker);
+    }
+    return;
+  }
   for (const c of state.countries) {
     if (!c.iso || !c.xy || statusOf(c.iso) !== "live") continue;
     const s = el("path", {
@@ -412,33 +503,31 @@ function burstAt(iso) {
 }
 
 function ignite(iso) {
-  const c = state.byIso.get(iso);
-  if (!c?.node) return;
-  c.node.classList.remove("ignite");
-  void c.node.getBBox; // reflow to restart animation
-  c.node.classList.add("ignite");
-  setTimeout(() => c.node?.classList.remove("ignite"), 2500);
+  const nodes = countryNodes(iso);
+  if (!nodes.length) return;
+  for (const node of nodes) node.classList.remove("ignite");
+  void nodes[0].getBBox; // reflow to restart animation
+  for (const node of nodes) node.classList.add("ignite");
+  setTimeout(() => nodes.forEach((node) => node.classList.remove("ignite")), 2500);
 }
 
 /* ---------------------------------------------------------------- counters */
 
-const counters = { lit: $("#c-lit"), monitoring: $("#c-monitoring"), reports: $("#c-reports") };
-const prevTotals = { lit: null, monitoring: null, reports: null };
+const counters = {
+  lit: $("#c-lit"),
+  waiting: $("#c-waiting"),
+  monitoring: $("#c-monitoring"),
+  reports: $("#c-reports"),
+};
+const prevTotals = { lit: null, waiting: null, monitoring: null, reports: null };
 
 function viewTotals() {
-  if (!state.scriptOnly) return state.summary.totals;
-  let lit = 0;
-  let reports = 0;
-  for (const country of Object.values(state.summary.countries)) {
-    reports += country.watcher ?? 0;
-    if ((country.watcher ?? 0) >= 2) lit++;
-  }
-  return { ...state.summary.totals, lit, reports };
+  return totalsForView(state.summary, state.viewMode);
 }
 
 function paintCounters() {
   const totals = viewTotals();
-  for (const key of ["lit", "monitoring", "reports"]) {
+  for (const key of ["lit", "waiting", "monitoring", "reports"]) {
     const node = counters[key];
     const val = totals[key] ?? 0;
     if (prevTotals[key] !== null && prevTotals[key] !== val) {
@@ -449,9 +538,11 @@ function paintCounters() {
     prevTotals[key] = val;
     node.textContent = val.toLocaleString();
   }
-  document.title = totals.lit > 0
-    ? `(${totals.lit} lit) gpt6astra.watch`
-    : "gpt6astra.watch — is it in your sky yet?";
+  document.title = state.viewMode === "waiting" && totals.waiting > 0
+    ? `(${totals.waiting} waiting ☹) gpt6astra.watch`
+    : totals.lit > 0
+      ? `(${totals.lit} lit) gpt6astra.watch`
+      : "gpt6astra.watch — is it in your sky yet?";
 }
 
 /* ---------------------------------------------------------------- panel */
@@ -463,8 +554,9 @@ function selectCountry(iso) {
   if (!c) return;
   state.selected = iso;
   for (const node of gCountries.children) node.classList.remove("selected");
-  c.node?.classList.add("selected");
+  for (const node of countryNodes(iso)) node.classList.add("selected");
   renderPanel();
+  hydrateVote(iso);
 }
 
 function closePanel() {
@@ -475,12 +567,72 @@ function closePanel() {
 
 function statusLabel(data, status = statusFromCountry(data)) {
   if (status === "live") return "✦ Lit";
-  if (status === "none") return "Still dark";
-  if (state.scriptOnly || ((data.watcher ?? 0) > 0 && !(data.web ?? 0))) {
+  if (status === "none") {
+    const showsWaiting = state.viewMode === "all" || state.viewMode === "waiting";
+    return showsWaiting && (data.waiting ?? 0) > 0 ? "☹ Still waiting" : "Still dark";
+  }
+  if (state.viewMode === "script" || ((data.watcher ?? 0) > 0 && !(data.web ?? 0))) {
     return "Script reported";
   }
-  if ((data.web ?? 0) > 0 && !(data.watcher ?? 0)) return "Self reported";
+  if (state.viewMode === "got" || ((data.web ?? 0) > 0 && !(data.watcher ?? 0))) {
+    return "Self reported";
+  }
   return "Reported";
+}
+
+function voteCacheKey(iso) {
+  return `astra-vote-${iso}`;
+}
+
+function cachedVote(iso) {
+  const vote = localStorage.getItem(voteCacheKey(iso));
+  if (vote === "waiting" || vote === "available") {
+    return { vote, can_manage: true, cached: true };
+  }
+  if (localStorage.getItem(`astra-reported-${iso}`)) {
+    return { vote: "available", can_manage: true, cached: true };
+  }
+  return null;
+}
+
+function rememberVote(iso, voteState) {
+  if (voteState?.vote === "waiting" || voteState?.vote === "available") {
+    localStorage.setItem(voteCacheKey(iso), voteState.vote);
+    if (voteState.vote === "available") {
+      localStorage.setItem(`astra-reported-${iso}`, String(Date.now()));
+    } else {
+      localStorage.removeItem(`astra-reported-${iso}`);
+    }
+  } else {
+    localStorage.removeItem(voteCacheKey(iso));
+    localStorage.removeItem(`astra-reported-${iso}`);
+  }
+}
+
+function personalVote(iso) {
+  return state.votes.get(iso) || cachedVote(iso);
+}
+
+async function hydrateVote(iso) {
+  if (state.voteRequests.has(iso)) return state.voteRequests.get(iso);
+  const pending = (async () => {
+    try {
+      const response = await fetch(`/api/vote?country=${encodeURIComponent(iso)}`, {
+        cache: "no-store",
+      });
+      if (!response.ok) return;
+      const data = await response.json();
+      state.votes.set(iso, data);
+      rememberVote(iso, data);
+      if (state.selected === iso) renderPanel();
+    } catch {
+      // The local cache remains a temporary UI fallback while offline.
+    } finally {
+      state.voteRequests.delete(iso);
+    }
+  })();
+  state.voteRequests.set(iso, pending);
+  return pending;
 }
 
 function renderPanel() {
@@ -489,7 +641,7 @@ function renderPanel() {
   if (!c || !iso) return;
   const d = state.summary.countries[iso] || {};
   const viewStatus = statusOf(iso);
-  const reported = localStorage.getItem(`astra-reported-${iso}`);
+  const mine = personalVote(iso);
 
   panel.innerHTML = "";
   const close = document.createElement("button");
@@ -508,10 +660,14 @@ function renderPanel() {
   const statusLine = document.createElement("div");
   statusLine.className = "status-line";
   const chip = document.createElement("span");
-  chip.className = `status-chip ${viewStatus}`;
+  const showsWaiting = state.viewMode === "all" || state.viewMode === "waiting";
+  const chipStatus = viewStatus === "none" && showsWaiting && (d.waiting ?? 0) > 0
+    ? "waiting"
+    : viewStatus;
+  chip.className = `status-chip ${chipStatus}`;
   chip.textContent = statusLabel(d, viewStatus);
   statusLine.append(chip);
-  if (viewStatus === "live" && d.first_at && !state.scriptOnly) {
+  if (viewStatus === "live" && d.first_at && state.viewMode === "all") {
     const since = document.createElement("span");
     since.textContent = `first seen ${relTime(d.first_at)}`;
     statusLine.append(since);
@@ -519,33 +675,74 @@ function renderPanel() {
 
   const stats = document.createElement("div");
   stats.className = "stats";
-  const visibleReports = state.scriptOnly ? (d.watcher ?? 0) : (d.reports ?? 0);
+  const showGot = state.viewMode === "all" || state.viewMode === "got";
+  const showWaiting = state.viewMode === "all" || state.viewMode === "waiting";
+  const showScript = state.viewMode === "all" || state.viewMode === "script";
+  const manualGot = showGot ? (d.web ?? 0).toLocaleString() : "—";
+  const waiting = showWaiting ? (d.waiting ?? 0).toLocaleString() : "—";
+  const verifiedWaiting = d.waiting_watcher ?? 0;
+  const waitingLabel = showWaiting
+    ? verifiedWaiting > 0
+      ? `still waiting · ${verifiedWaiting.toLocaleString()} script verified`
+      : "still waiting"
+    : "waiting votes hidden";
   stats.innerHTML = `
-    <div><b>${visibleReports.toLocaleString()}</b><span>${state.scriptOnly ? "script reports" : "reports"}</span></div>
-    <div><b>${(d.monitoring ?? 0).toLocaleString()}</b><span>monitoring now</span></div>
-    <div><b>${d.web ?? 0}</b><span>${state.scriptOnly ? "web reports hidden" : "distinct reporters"}</span></div>
-    <div><b>${d.watcher ?? 0}</b><span>account signals</span></div>`;
+    <div><b>${manualGot}</b><span>${showGot ? "people got it" : "got-it votes hidden"}</span></div>
+    <div><b>${waiting}</b><span>${waitingLabel}</span></div>
+    <div><b>${showScript ? (d.watcher ?? 0).toLocaleString() : "—"}</b><span>${showScript ? "account signals" : "script signals hidden"}</span></div>
+    <div><b>${showScript ? (d.monitoring ?? 0).toLocaleString() : "—"}</b><span>${showScript ? "monitoring now" : "monitoring hidden"}</span></div>`;
 
   const actions = document.createElement("div");
   actions.className = "actions";
 
-  if (reported) {
+  if (mine?.network_claimed && !mine.can_manage) {
+    const notice = document.createElement("div");
+    notice.className = "vote-notice";
+    notice.textContent = "A response from this network is already counted. Use the original browser to change it.";
+    actions.append(notice);
+  } else if (mine?.vote === "available") {
     const thanks = document.createElement("div");
     thanks.className = "thanks";
-    thanks.textContent = "You're counted. Welcome to the constellation ✦";
-    const undo = document.createElement("button");
-    undo.className = "btn btn-ghost";
-    undo.type = "button";
-    undo.textContent = "Reported by mistake? Undo";
-    undo.onclick = () => undoReport(iso, undo);
-    actions.append(thanks, undo);
+    thanks.textContent = mine.was_waiting
+      ? "Your waiting vote became a star ✦"
+      : "You're counted. Welcome to the constellation ✦";
+    const correction = document.createElement("button");
+    correction.className = "btn btn-ghost";
+    correction.type = "button";
+    correction.textContent = mine.was_waiting
+      ? "Reported by mistake? Back to waiting"
+      : "Reported by mistake? Undo";
+    correction.onclick = () => mine.was_waiting
+      ? submitVote(iso, "waiting", correction)
+      : removeVote(iso, correction);
+    actions.append(thanks, correction);
+  } else if (mine?.vote === "waiting") {
+    const waitingNotice = document.createElement("div");
+    waitingNotice.className = "thanks waiting";
+    waitingNotice.textContent = "You're counted among those still waiting.";
+    const gotIt = document.createElement("button");
+    gotIt.className = "btn btn-primary";
+    gotIt.type = "button";
+    gotIt.textContent = "✦ I got Astra now";
+    gotIt.onclick = () => submitVote(iso, "available", gotIt);
+    const remove = document.createElement("button");
+    remove.className = "btn btn-ghost btn-quiet";
+    remove.type = "button";
+    remove.textContent = "Remove my response";
+    remove.onclick = () => removeVote(iso, remove);
+    actions.append(waitingNotice, gotIt, remove);
   } else {
-    const btn = document.createElement("button");
-    btn.className = "btn btn-primary";
-    btn.type = "button";
-    btn.textContent = `✦ I got Astra — light up ${c.name}`;
-    btn.onclick = () => submitReport(iso, btn);
-    actions.append(btn);
+    const gotIt = document.createElement("button");
+    gotIt.className = "btn btn-primary";
+    gotIt.type = "button";
+    gotIt.textContent = `✦ I got Astra — light up ${c.name}`;
+    gotIt.onclick = () => submitVote(iso, "available", gotIt);
+    const waiting = document.createElement("button");
+    waiting.className = "btn btn-ghost";
+    waiting.type = "button";
+    waiting.textContent = "I don't have Astra yet";
+    waiting.onclick = () => submitVote(iso, "waiting", waiting);
+    actions.append(gotIt, waiting);
   }
 
   const watch = document.createElement("a");
@@ -556,19 +753,27 @@ function renderPanel() {
 
   const hint = document.createElement("p");
   hint.className = "hint";
-  hint.textContent = state.scriptOnly
-    ? "Showing only access reports sent by consented skill/script watchers. Manual web reports are hidden."
-    : "The map is crowd signal — anyone can light a country. For proof on your own account, use a watcher (it checks the Codex model picker).";
+  hint.textContent = {
+    all: "Waiting votes never light a country. Positive reports remain crowd signals; use a watcher for proof on your own account.",
+    got: "Showing only people who manually reported that Astra reached them.",
+    waiting: "Showing the waiting room ☹ Sad faces grow as more people wait, but never light a country.",
+    script: "Showing only access reports sent by consented skill/script watchers. Manual votes are hidden.",
+  }[state.viewMode];
 
   panel.append(close, flag, h2, statusLine, stats, actions, hint);
   panel.hidden = false;
 }
 
-function confirmCountryMismatch(iso) {
+function confirmCountryMismatch(iso, vote) {
   const detectedIso = state.detectedCountry;
   if (!detectedIso || detectedIso === iso) return true;
   const detectedName = state.byIso.get(detectedIso)?.name || detectedIso;
   const reportName = state.byIso.get(iso)?.name || iso;
+  if (vote === "waiting") {
+    return window.confirm(
+      `Your current sky looks like ${detectedName}. Are you sure you're reporting that you are still waiting in ${reportName}?`
+    );
+  }
   const questions = [
     `Tiny telescope check: your current sky looks like ${detectedName}, but you're reporting ${reportName}. Did Astra really land there?`,
     `Constellation double-check: ${reportName}, not ${detectedName} — are you absolutely sure?`,
@@ -577,63 +782,63 @@ function confirmCountryMismatch(iso) {
   return questions.every((question) => window.confirm(question));
 }
 
-async function submitReport(iso, btn) {
-  if (!confirmCountryMismatch(iso)) {
+async function submitVote(iso, vote, btn) {
+  if (!confirmCountryMismatch(iso, vote)) {
     toast("Launch aborted — no stars were harmed ✦");
     return;
   }
   btn.disabled = true;
-  btn.textContent = "Lighting it up…";
+  btn.textContent = vote === "available" ? "Lighting it up…" : "Counting your sky…";
   try {
-    const res = await fetch("/api/report", {
-      method: "POST",
+    const res = await fetch("/api/vote", {
+      method: "PUT",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ country: iso, nickname: "" }),
+      body: JSON.stringify({ country: iso, vote, nickname: "" }),
     });
     const data = await res.json();
     if (!res.ok) throw new Error(data.error || "failed");
-    if (data.deduped) {
-      if (data.can_undo) {
-        localStorage.setItem(`astra-reported-${iso}`, String(Date.now()));
-      } else {
-        localStorage.removeItem(`astra-reported-${iso}`);
-      }
-      toast(data.message || "You already reported this country ✦");
-    } else {
-      localStorage.setItem(`astra-reported-${iso}`, String(Date.now()));
+    state.votes.set(iso, data);
+    rememberVote(iso, data);
+    if (data.network_claimed) {
+      toast(data.message || "A response from this network is already counted.");
+    } else if (vote === "available") {
       burstAt(iso);
       ignite(iso);
-      toast("Lit ✦ thanks for reporting");
-      await refreshSummary(true);
+      toast(data.converted ? "You got it — your waiting vote is now a star ✦" : "Lit ✦ thanks for reporting");
+    } else {
+      toast(data.converted_back ? "Corrected — you're back among those still waiting." : "Counted — we hope Astra reaches you soon ✦");
     }
+    await refreshSummary(true);
     renderPanel();
-  } catch (err) {
-    toast("Could not report — try again in a moment");
+  } catch {
+    toast("Could not update your response — try again in a moment");
     btn.disabled = false;
-    btn.textContent = "✦ I got Astra";
+    btn.textContent = vote === "available" ? "✦ I got Astra" : "I don't have Astra yet";
   }
 }
 
-async function undoReport(iso, btn) {
+async function removeVote(iso, btn) {
   btn.disabled = true;
   btn.textContent = "Correcting the sky…";
   try {
-    const res = await fetch("/api/report", {
+    const res = await fetch("/api/vote", {
       method: "DELETE",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ country: iso }),
     });
     const data = await res.json();
     if (!res.ok) throw new Error(data.error || "failed");
-    localStorage.removeItem(`astra-reported-${iso}`);
+    state.votes.set(iso, data);
+    rememberVote(iso, null);
     toast(data.removed
-      ? "Report removed — thanks for keeping the constellation honest ✦"
-      : "That report was already gone.");
+      ? "Response removed — thanks for keeping the constellation honest ✦"
+      : "That response was already gone.");
     await refreshSummary(true);
-  } catch (err) {
-    toast("Could not undo from this browser — the private undo key may be missing");
+    renderPanel();
+  } catch {
+    toast("Could not remove this response — the private browser key may be missing");
     btn.disabled = false;
-    btn.textContent = "Reported by mistake? Undo";
+    btn.textContent = "Remove my response";
   }
 }
 
@@ -649,27 +854,43 @@ document.addEventListener("keydown", (e) => {
 function paintYouChip() {
   const chip = $("#you-chip");
   const select = $("#country-select");
-  if (!state.countries.length) return;
+  const reportButton = $("#you-got");
+  if (!state.byIso.size) return;
   if (!select.options.length) {
-    const sorted = [...state.countries].filter((c) => c.iso).sort((a, b) => a.name.localeCompare(b.name));
+    const placeholder = document.createElement("option");
+    placeholder.value = "";
+    placeholder.textContent = "Country not detected — choose yours";
+    placeholder.disabled = true;
+    select.append(placeholder);
+
+    const sorted = [...state.countryOptions].sort((a, b) => a.name.localeCompare(b.name));
     for (const c of sorted) {
       const opt = document.createElement("option");
       opt.value = c.iso;
       opt.textContent = `${c.name}`;
       select.append(opt);
     }
-    if (state.myCountry) select.value = state.myCountry;
+    select.value = state.myCountry || "";
+    reportButton.disabled = !select.value;
     select.addEventListener("change", () => {
       state.myCountry = select.value;
+      state.detectedCountry = null;
+      reportButton.disabled = !select.value;
       selectCountry(select.value);
     });
-    $("#you-got").addEventListener("click", () => selectCountry(select.value));
+    reportButton.addEventListener("click", () => {
+      if (!select.value) {
+        toast("Choose your country before reporting your status.");
+        return;
+      }
+      selectCountry(select.value);
+    });
   }
   chip.hidden = false;
   const c = state.byIso.get(state.myCountry) || null;
   $("#you-text").innerHTML = c
     ? `Your sky: <strong>${flagOf(c.iso)} ${c.name}</strong> — ${statusLabel(state.summary.countries[c.iso] || {}, statusOf(c.iso)).toLowerCase()}`
-    : `Pick your sky:`;
+    : `Country not detected — choose yours:`;
 }
 
 /* ---------------------------------------------------------------- ticker */
@@ -682,9 +903,29 @@ function pushTick(event) {
 
 function paintTicker() {
   const track = $("#ticker-track");
-  const visibleEvents = state.scriptOnly
+  if (state.viewMode === "waiting") {
+    const items = Object.entries(state.summary.countries)
+      .filter(([, country]) => (country.waiting ?? 0) > 0)
+      .sort((a, b) => (b[1].waiting ?? 0) - (a[1].waiting ?? 0))
+      .slice(0, 16)
+      .map(([iso, country]) => {
+        const name = state.byIso.get(iso)?.name || iso;
+        const count = country.waiting ?? 0;
+        return `<span class="tick waiting-event"><span class="t-face">☹</span>` +
+          `<strong>${name}</strong>: ${count.toLocaleString()} ${count === 1 ? "person is" : "people are"} staring dramatically at the sky</span>`;
+      });
+    if (!items.length) {
+      items.push('<span class="tick waiting-event"><span class="t-face">☹</span>the waiting room is suspiciously empty…</span>');
+    }
+    const html = items.join("");
+    track.innerHTML = html + html;
+    return;
+  }
+  const visibleEvents = state.viewMode === "script"
     ? state.tickEvents.filter((event) => event.type === "report" && event.source === "watcher")
-    : state.tickEvents;
+    : state.viewMode === "got"
+      ? state.tickEvents.filter((event) => event.type === "report" && event.source === "web")
+      : state.tickEvents;
   const items = visibleEvents.map((e) => {
     if (e.type === "lit") {
       return `<span class="tick lit-event"><span class="t-flag">${flagOf(e.cc)}</span>` +
@@ -695,7 +936,12 @@ function paintTicker() {
       `${e.source === "watcher" ? " · account signal" : ""} <time>${relTime(e.ts)}</time></span>`;
   });
   if (!items.length) {
-    items.push('<span class="tick">waiting for the first reports… be the star that breaks the dark ✦</span>');
+    const empty = state.viewMode === "script"
+      ? "waiting for the first account signal…"
+      : state.viewMode === "got"
+        ? "waiting for someone to report that Astra landed…"
+        : "waiting for the first reports… be the star that breaks the dark ✦";
+    items.push(`<span class="tick">${empty}</span>`);
   }
   const html = items.join("");
   track.innerHTML = html + html; // duplicated for the seamless marquee loop
@@ -756,11 +1002,12 @@ addEventListener("resize", () => {
   resizeTimer = setTimeout(layoutMap, 120);
 });
 
-const scriptOnlyToggle = $("#script-only");
-scriptOnlyToggle.checked = state.scriptOnly;
-scriptOnlyToggle.addEventListener("change", () => {
-  state.scriptOnly = scriptOnlyToggle.checked;
-  localStorage.setItem("astra-script-only", state.scriptOnly ? "1" : "0");
+const mapViewSelect = $("#map-view");
+mapViewSelect.value = state.viewMode;
+mapViewSelect.addEventListener("change", () => {
+  state.viewMode = VIEW_MODES.has(mapViewSelect.value) ? mapViewSelect.value : "all";
+  localStorage.setItem("astra-view-mode", state.viewMode);
+  localStorage.removeItem("astra-script-only");
   paintCountries();
   renderStars();
   renderConstellation();
@@ -771,6 +1018,7 @@ scriptOnlyToggle.addEventListener("change", () => {
 
 (async () => {
   await loadWorld();
+  await loadCountryOptions();
   await refineDetectedCountry();
   layoutMap();
   paintCountries();

@@ -14,25 +14,28 @@ gpt6astra.watch is a crowd-watched rollout map. An account watcher checks the si
 - The account checker talks only to the local `codex app-server` process.
 - Network calls may go only to `gpt6astra.watch`.
 - Do not send watcher signals without explicit consent.
+- Never infer the user's country from timezone, language, account locale, or the AI agent's own network location.
 - Do not create, download, or schedule a watcher before the consent answer in Step 1.
-- Never create a manual report or send `access`/`country_live` as a test. Production map data must describe real community state.
+- Never create a manual vote or send `access`/`country_live` as a test. Production map data must describe real community state.
 - Use `--force --no-notify` for account-checker smoke tests; it suppresses all watcher signals.
 
-## Step 1 — Confirm the detected country and get consent FIRST
+## Step 1 — Get explicit country confirmation and consent FIRST
 
-The copy served from `https://gpt6astra.watch/SKILL.md` has a location block immediately after its metadata. It contains the country Cloudflare detected for this request. Use that country; do not make another location request.
+The copy served from `https://gpt6astra.watch/SKILL.md` has a location block immediately after its metadata. It may contain the country where this request reached Cloudflare. Treat it only as an unconfirmed hint: an AI agent, VPN, relay, or remote browser may make the request from somewhere else.
 
-Before changing the machine, tell the user the detected country and ask exactly one yes/no question:
+Before changing the machine:
 
-> You appear to be in COUNTRY (CC). Would you like to contribute anonymously to the map while this watcher is active and when Astra reaches your account? This sends the country, a random installation ID, heartbeat timestamps, and the access timestamp; no account name, hostname, or raw IP. Yes or no?
+1. Ask which country the user is currently in. If the location block has a hint, mention it and ask the user to confirm or correct it. If it has no hint, say **“Country not detected.”** Do not continue until the user explicitly supplies or confirms a country.
+2. After confirmation, ask exactly one sharing-consent yes/no question using the confirmed country:
 
-- If the user corrects the detected location, use the corrected ISO 3166-1 alpha-2 code.
-- If location detection was unavailable, ask which country they are in, then ask the same consent question.
+> You confirmed COUNTRY (CC). Would you like to contribute anonymously to the map while this watcher is active and when Astra reaches your account? This sends the country, a random installation ID, heartbeat timestamps, successful still-waiting confirmations, and the access timestamp; no account name, hostname, or raw IP. Yes or no?
+
+- Resolve the confirmed country to its ISO 3166-1 alpha-2 code. If the name is ambiguous, ask rather than guess.
 - **Yes**: set `SHARE=1`; account-checker schedules include `--share-country CC`.
 - **No**: set `SHARE=0`; omit `--share-country`. The watcher remains fully local except for region fallback status reads.
-- Wait for the answer. Never treat silence as consent.
+- Wait for both answers. Never treat a network hint or silence as confirmation or consent.
 
-The SKILL.md fetch itself is already recorded as private analytics: country, timestamp, and a salted one-way IP hash. Raw IPs are not stored and these analytics are not published.
+The SKILL.md fetch itself is already recorded as private analytics: request-network country, timestamp, and a salted one-way IP hash. Raw IPs are not stored and these analytics are not published. The request-network country is not treated as the user's confirmed country.
 
 ## Step 2 — Choose the local watcher
 
@@ -76,7 +79,7 @@ Scheduled command:
 python3 /ABSOLUTE/PATH/astra-watch-check.py [--share-country CC]
 ```
 
-Include the bracketed argument only after a yes answer. On every scheduled attempt it sends an anonymous heartbeat. Once the account exposes Astra it sends one idempotent access event, preserves the anonymous wait duration, sends one desktop notification, and self-quiets. Network/auth failures are never interpreted as unavailability. Three consecutive checker failures produce one health notification.
+Include the bracketed argument only after a yes answer. On every scheduled attempt it sends an anonymous heartbeat. Only after a successful authenticated catalog check confirms Astra is absent does it send a temporary still-waiting confirmation to the same map total as website responses. Once the account exposes Astra, it stops counting that watcher as waiting, sends one idempotent access event, preserves the anonymous wait duration, sends one desktop notification, and self-quiets. Network/auth failures never count as waiting or availability. Three consecutive checker failures produce one health notification.
 
 ## Step 4B — Install the POSIX region fallback
 
@@ -280,15 +283,16 @@ rm -rf ~/.local/bin/astra-watch* ~/.local/state/astra-watch
 
 ## Community integrity and mistaken reports
 
-- Never call `POST /api/report` during installation or testing. A manual web report is valid only after the user confirms Astra is actually available to them.
+- Never call `PUT /api/vote` or `POST /api/report` during installation or testing. A manual web vote is valid only when it describes the user's real current access.
 - Never fabricate watcher IDs, heartbeats, access events, or country-completion events for verification. A consented scheduled watcher may send its real initial heartbeat.
-- The map accepts only one active manual report per salted IP hash and country. A duplicate response means: “You already reported Astra for this country. One star per network—keep the constellation honest ✦”
+- The map accepts only one active manual response per salted IP hash and country. Waiting responses remain separate from positive reports and never light a country. Consented account-watcher waiting confirmations expire after missed checks, and a same-network website response plus watcher confirmation counts as one person in the combined total.
+- A user who chose **I don't have Astra yet** can return in the same browser and click **I got Astra now**. The private HttpOnly browser token converts the waiting vote into one positive report even if the user's IP changed.
 - A pre-undo legacy report can be reclaimed without duplication: from the same network, click **I got Astra** once. The server recognizes the salted IP/country pair, issues this browser an undo cookie, and exposes the Undo button. If the IP changed, do not guess ownership or delete unrelated data.
-- If the user reported by mistake, tell them to reopen that country in the same browser and click **Reported by mistake? Undo**. The browser calls `DELETE /api/report` with `{\"country\":\"CC\"}` and its private HttpOnly undo cookie.
-- The undo endpoint deletes only the exact matching manual web report. Do not attempt to extract, copy, or fabricate the cookie. Watcher access signals cannot be removed through this endpoint.
+- If a converted user reports access by mistake, **Reported by mistake? Back to waiting** removes only the owned positive report and restores the waiting vote. A direct positive report can still be undone completely, and a waiting user can choose **Remove my response**.
+- Do not attempt to extract, copy, or fabricate the ownership cookie. Watcher access signals cannot be changed or removed through the manual-vote endpoints.
 
 ## Privacy and internal analytics
 
 Fetching `SKILL.md` stores country, first/last request timestamps, request count, and a salted one-way IP hash for private funnel analytics. Those counts are not exposed by the public API.
 
-After explicit consent, a watcher sends the country, a random installation ID, heartbeat timestamps, and an access/completion timestamp. The server HMAC-hashes both the installation ID and IP, never stores raw IP, account name, hostname, or Codex data, and retains anonymous start/completion timestamps to calculate wait-duration statistics. Without consent, the account watcher is fully local. Source: https://github.com/hancengiz/gpt6astra.watch
+After explicit consent, a watcher sends the country, a random installation ID, heartbeat timestamps, successful still-waiting confirmations, and an access/completion timestamp. The server HMAC-hashes both the installation ID and IP, never stores raw IP, account name, hostname, or Codex data, and retains anonymous start/completion timestamps to calculate wait-duration statistics. Without consent, the account watcher is fully local. Source: https://github.com/hancengiz/gpt6astra.watch

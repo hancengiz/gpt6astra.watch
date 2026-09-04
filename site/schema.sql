@@ -26,6 +26,26 @@ CREATE TABLE IF NOT EXISTS report_claims (
   PRIMARY KEY (ip_hash, country)
 );
 
+-- Manual "not yet" responses remain separate from the positive reports
+-- ledger, so they can never light a country or enter the availability feed.
+-- A converted row is retained to preserve its original waiting timestamp.
+CREATE TABLE IF NOT EXISTS waiting_votes (
+  id                INTEGER PRIMARY KEY AUTOINCREMENT,
+  country           TEXT    NOT NULL,
+  ip_hash           TEXT    NOT NULL,
+  ownership_hash    TEXT    NOT NULL, -- HMAC of the browser-only vote token
+  created_at        INTEGER NOT NULL,
+  last_confirmed_at INTEGER NOT NULL,
+  converted_at      INTEGER,
+  UNIQUE(ip_hash, country),
+  UNIQUE(country, ownership_hash)
+);
+
+CREATE INDEX IF NOT EXISTS idx_waiting_votes_active
+  ON waiting_votes(country, converted_at, last_confirmed_at);
+CREATE INDEX IF NOT EXISTS idx_waiting_votes_ownership
+  ON waiting_votes(country, ownership_hash);
+
 CREATE TABLE IF NOT EXISTS watchers (
   id                 INTEGER PRIMARY KEY AUTOINCREMENT,
   country            TEXT    NOT NULL,
@@ -36,6 +56,8 @@ CREATE TABLE IF NOT EXISTS watchers (
   last_seen_at       INTEGER NOT NULL,
   completed_at       INTEGER,
   access_detected_at INTEGER,
+  last_waiting_at    INTEGER,  -- last successful account check that found Astra absent
+  response_hash      TEXT,     -- manual-vote hash namespace; dedupes same-network responses
   completion_reason  TEXT CHECK (
     completion_reason IS NULL OR completion_reason IN ('account_access','country_live')
   ),
@@ -46,6 +68,8 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_watchers_identity ON watchers(watcher_hash
 CREATE INDEX IF NOT EXISTS idx_watchers_active ON watchers(completed_at, last_seen_at, country);
 CREATE INDEX IF NOT EXISTS idx_watchers_completed ON watchers(completed_at, started_at);
 CREATE INDEX IF NOT EXISTS idx_watchers_ip_time ON watchers(ip_hash, created_at);
+CREATE INDEX IF NOT EXISTS idx_watchers_waiting
+  ON watchers(mode, completed_at, last_waiting_at, country);
 
 CREATE TABLE IF NOT EXISTS skill_requests (
   id                 INTEGER PRIMARY KEY AUTOINCREMENT,

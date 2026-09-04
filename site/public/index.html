@@ -4,9 +4,9 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>gpt6astra.watch — is it in your sky yet?</title>
-<meta name="description" content="The crowd-watched rollout of GPT-6 Astra. Watch the world light up region by region, report yours, or let your AI agent watch for you.">
+<meta name="description" content="The crowd-watched rollout of GPT-6 Astra. Say you're still waiting, light up your country when it arrives, or let your AI agent watch for you.">
 <meta property="og:title" content="gpt6astra.watch — is it in your sky yet?">
-<meta property="og:description" content="The crowd-watched rollout of GPT-6 Astra. Watch the sky light up, report your region, or let your agent watch for you.">
+<meta property="og:description" content="The crowd-watched rollout of GPT-6 Astra. Say you're still waiting, light up your country when it arrives, or let your agent watch for you.">
 <meta property="og:type" content="website">
 <meta property="og:url" content="https://gpt6astra.watch/">
 <meta name="twitter:card" content="summary">
@@ -33,10 +33,12 @@
   <section class="hero">
     <h1>Is it in <em>your</em> sky yet?</h1>
     <p class="sub">GPT-6&nbsp;Astra is rolling out account by account, region by region.
-       This is the crowd-watched sky: light yours up when it lands, or let your agent watch for you.</p>
+       This is the crowd-watched sky: tell us if you're still waiting, light yours up when it lands,
+       or let your agent watch for you.</p>
 
     <div class="counters" aria-live="polite">
       <div class="counter"><span id="c-lit" class="num">–</span><label>countries lit</label></div>
+      <div class="counter"><span id="c-waiting" class="num">–</span><label>still waiting</label></div>
       <div class="counter"><span id="c-monitoring" class="num">–</span><label>monitoring now</label></div>
       <div class="counter"><span id="c-reports" class="num">–</span><label>reports</label></div>
     </div>
@@ -44,15 +46,21 @@
     <div class="you-chip" id="you-chip" hidden>
       <span id="you-text"></span>
       <select id="country-select" aria-label="Choose your country"></select>
-      <button id="you-got" class="btn btn-primary btn-small" type="button">✦ I got Astra</button>
+      <button id="you-got" class="btn btn-primary btn-small" type="button" disabled>Report my status</button>
     </div>
-    <label class="signal-filter">
-      <input id="script-only" type="checkbox">
-      <span>Show only skill/script reports</span>
+    <label class="signal-filter" for="map-view">
+      <span>Show</span>
+      <select id="map-view" aria-label="Choose which reports to show on the map">
+        <option value="all">Everything</option>
+        <option value="got">✦ I got Astra</option>
+        <option value="waiting">☹ Desperately waiting</option>
+        <option value="script">⌁ Skill/script reports</option>
+      </select>
     </label>
   </section>
 
   <div class="legend" aria-hidden="true">
+    <span><i class="dot waiting"></i>still waiting</span>
     <span><i class="dot rumored"></i>self reported</span>
     <span><i class="dot reported"></i>script reported</span>
     <span><i class="dot live"></i>lit ✦</span>
@@ -68,7 +76,7 @@
 
 <footer class="foot">
   <span>Not affiliated with OpenAI. Astra is their star; this is just the sky watching it rise.</span>
-  <span>Reports use country, time, and salted one-way identifiers. SKILL.md requests also feed private, unpublished funnel analytics. Raw IPs are never stored. <a href="/skill">How stargazing works</a></span>
+  <span>Votes use country, time, and salted one-way identifiers. SKILL.md requests also feed private, unpublished funnel analytics. Raw IPs are never stored. <a href="/skill">How stargazing works</a> · Crimea boundary: <a href="https://www.geoboundaries.org/api/current/gbOpen/UKR/ADM1/" rel="noopener">geoBoundaries/OSM contributors</a></span>
 </footer>
 
 <div id="toast" role="status" hidden></div>
