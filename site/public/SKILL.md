@@ -289,6 +289,6 @@ rm -rf ~/.local/bin/astra-watch* ~/.local/state/astra-watch
 - If a converted user reports access by mistake, **Reported by mistake? Back to waiting** removes only the owned positive report and restores the waiting vote. A direct positive report can still be undone completely, and a waiting user can choose **Remove my response**.
 - Do not attempt to extract, copy, or fabricate the ownership cookie. Watcher access signals cannot be changed or removed through the manual-vote endpoints.
 
-## Privacy and internal analytics
+## Watcher privacy
 
 After explicit consent, a watcher sends the country, a random installation ID, heartbeat timestamps, successful still-waiting confirmations, and an access/completion timestamp. The server HMAC-hashes both the installation ID and IP, never stores raw IP, account name, hostname, or Codex data, and retains anonymous start/completion timestamps to calculate wait-duration statistics. Without consent, the account watcher is fully local. Source: https://github.com/hancengiz/gpt6astra.watch
