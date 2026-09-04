@@ -1,0 +1,21 @@
+# Temporary local-first deployment.
+# Later: create the Git-integrated Pages project, remove this Worker's custom
+# domain, and attach gpt6astra.watch to Pages. See README.md.
+name = "gpt6astra-watch-temporary"
+main = "public/_worker.js"
+compatibility_date = "2026-09-01"
+
+routes = [
+  { pattern = "gpt6astra.watch", custom_domain = true }
+]
+
+[assets]
+directory = "./public"
+binding = "ASSETS"
+run_worker_first = true
+html_handling = "auto-trailing-slash"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "astra-watch"
+database_id = "d836f510-3a99-4251-901c-7022afad5568"

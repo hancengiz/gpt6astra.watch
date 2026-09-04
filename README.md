@@ -70,7 +70,7 @@ again. Desktop notifications require an active graphical session.
 
 ## Public map
 
-The complete Cloudflare Pages output lives in `site/public/`:
+The complete deployment output lives in `site/public/`:
 
 - `index.html`, `style.css`, `app.js` — the cosmic map, live counters, ticker,
   country panel, and reporting flow.
@@ -95,6 +95,33 @@ npx wrangler pages dev
 
 Open `http://localhost:8788`. Local D1 state is under `.wrangler/` and is
 gitignored.
+
+## Current live deployment
+
+`https://gpt6astra.watch` currently runs from the temporary Worker
+`gpt6astra-watch-temporary`, deployed from `site/wrangler.worker.toml`. This
+keeps the site live from the local folder without creating a Direct Upload
+Pages project (which would permanently block later Git integration).
+
+Redeploy the current live Worker from this checkout:
+
+```bash
+cd site
+npx wrangler deploy -c wrangler.worker.toml
+```
+
+The Worker uses the production `astra-watch` D1 database in EEUR. The
+`IP_HASH_SECRET` value exists only as a Worker secret.
+
+When the Git-integrated Pages project below is ready:
+
+1. Set its own `IP_HASH_SECRET` Pages secret.
+2. Verify its `*.pages.dev` URL.
+3. In the temporary Worker, remove `gpt6astra.watch` under **Settings →
+   Domains & Routes**.
+4. Attach `gpt6astra.watch` under the Pages project's **Custom domains**.
+5. Delete `gpt6astra-watch-temporary` after the Pages domain is healthy.
+
 
 ## Cloudflare Pages production setup
 
