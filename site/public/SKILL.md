@@ -35,8 +35,6 @@ Before changing the machine:
 - **No**: set `SHARE=0`; omit `--share-country`. The watcher remains fully local except for region fallback status reads.
 - Wait for both answers. Never treat a network hint or silence as confirmation or consent.
 
-The SKILL.md fetch itself is already recorded as private analytics: request-network country, timestamp, and a salted one-way IP hash. Raw IPs are not stored and these analytics are not published. The request-network country is not treated as the user's confirmed country.
-
 ## Step 2 — Choose the local watcher
 
 After consent, inspect the machine.
@@ -292,7 +290,5 @@ rm -rf ~/.local/bin/astra-watch* ~/.local/state/astra-watch
 - Do not attempt to extract, copy, or fabricate the ownership cookie. Watcher access signals cannot be changed or removed through the manual-vote endpoints.
 
 ## Privacy and internal analytics
-
-Fetching `SKILL.md` stores country, first/last request timestamps, request count, and a salted one-way IP hash for private funnel analytics. Those counts are not exposed by the public API.
 
 After explicit consent, a watcher sends the country, a random installation ID, heartbeat timestamps, successful still-waiting confirmations, and an access/completion timestamp. The server HMAC-hashes both the installation ID and IP, never stores raw IP, account name, hostname, or Codex data, and retains anonymous start/completion timestamps to calculate wait-duration statistics. Without consent, the account watcher is fully local. Source: https://github.com/hancengiz/gpt6astra.watch

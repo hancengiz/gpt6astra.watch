@@ -991,7 +991,6 @@ export default {
         detected =
           `> **Unconfirmed network-location hint:** ${name} (${country}). This is where the SKILL.md request reached Cloudflare and may be the AI agent's network, a VPN, or a relay rather than the user's country.\n` +
           `> First ask the user which country they are currently in; mention ${name} only as an unconfirmed hint. Never silently accept or infer the country.\n` +
-          `> This SKILL.md request records the request-network country, timestamp, and a salted one-way IP hash for private funnel analytics; the raw IP and counts are not published.\n` +
           `> After the user confirms a country, ask the explicit yes/no sharing question in Step 1. Do not create, download, or schedule anything until both the country and consent answer are explicit.`;
       } else {
         detected =
