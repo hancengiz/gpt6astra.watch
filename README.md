@@ -15,6 +15,30 @@ The checker does not use an OpenAI API key, scrape ChatGPT, or make model
 inference requests. It talks to the local `codex app-server` process and uses
 its documented `model/list` method.
 
+## Changelog
+
+### 2026-09-04
+
+- Added consented watcher heartbeats, a public active-monitoring count, separate
+  account-access and country-level completion events, and anonymous wait-time
+  statistics.
+- Personalized the served `SKILL.md` with Cloudflare's request country and
+  required an explicit yes/no privacy answer before installing anything.
+- Added private D1 funnel analytics from unique skill requests through watcher
+  installation and access, using only salted one-way identifiers.
+- Added a descriptive watcher User-Agent for Cloudflare compatibility and
+  redirected every public HTTP route to HTTPS.
+- Limited manual map reporting to one active report per salted IP hash and
+  country. Duplicate attempts receive a community-integrity reminder.
+- Added exact report undo using a country-scoped secure HttpOnly cookie whose
+  HMAC hash is stored with the report; watcher access signals cannot be removed
+  through this path.
+- Added the **Skill/script reports only** map filter and three humorous
+  confirmations when a manual report differs from the detected current
+  country.
+- Updated `SKILL.md` to prohibit fake production reports or watcher events
+  during testing and to guide users through the same-browser undo flow.
+
 ## Run manually
 
 ```bash
@@ -90,6 +114,12 @@ watcher counts as active for 25 minutes after its latest heartbeat and stops
 counting when it sends an access or country-completion event. Start and
 completion times preserve anonymous wait-duration statistics. Three distinct
 web reporters or two distinct account-access signals mark a country as lit.
+The map can filter to skill/script signals only. D1 permits one active manual
+report per salted IP hash and country. Its reporting browser receives a secure,
+HTTP-only undo token; only that token can remove the exact web report.
+Legacy reports remain untouched by migration. From the same network, repeating
+the report once claims the existing IP/country record for same-browser undo
+without creating another report.
 
 Every `/SKILL.md` GET also records country, first/last request time, request
 count, and a salted one-way IP hash for private funnel analytics. The public
@@ -138,6 +168,8 @@ Apply upgrades to an existing deployment before deploying new Worker code:
 cd site
 npx wrangler d1 execute astra-watch \
   --file migrations/0002_active_monitoring.sql --remote
+npx wrangler d1 execute astra-watch \
+  --file migrations/0003_report_undo.sql --remote
 ```
 
 

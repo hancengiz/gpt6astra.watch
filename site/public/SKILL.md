@@ -15,6 +15,8 @@ gpt6astra.watch is a crowd-watched rollout map. An account watcher checks the si
 - Network calls may go only to `gpt6astra.watch`.
 - Do not send watcher signals without explicit consent.
 - Do not create, download, or schedule a watcher before the consent answer in Step 1.
+- Never create a manual report or send `access`/`country_live` as a test. Production map data must describe real community state.
+- Use `--force --no-notify` for account-checker smoke tests; it suppresses all watcher signals.
 
 ## Step 1 — Confirm the detected country and get consent FIRST
 
@@ -275,6 +277,15 @@ Remove-Item "$env:USERPROFILE\astra-watch.ps1"
 # POSIX leftovers
 rm -rf ~/.local/bin/astra-watch* ~/.local/state/astra-watch
 ```
+
+## Community integrity and mistaken reports
+
+- Never call `POST /api/report` during installation or testing. A manual web report is valid only after the user confirms Astra is actually available to them.
+- Never fabricate watcher IDs, heartbeats, access events, or country-completion events for verification. A consented scheduled watcher may send its real initial heartbeat.
+- The map accepts only one active manual report per salted IP hash and country. A duplicate response means: “You already reported Astra for this country. One star per network—keep the constellation honest ✦”
+- A pre-undo legacy report can be reclaimed without duplication: from the same network, click **I got Astra** once. The server recognizes the salted IP/country pair, issues this browser an undo cookie, and exposes the Undo button. If the IP changed, do not guess ownership or delete unrelated data.
+- If the user reported by mistake, tell them to reopen that country in the same browser and click **Reported by mistake? Undo**. The browser calls `DELETE /api/report` with `{\"country\":\"CC\"}` and its private HttpOnly undo cookie.
+- The undo endpoint deletes only the exact matching manual web report. Do not attempt to extract, copy, or fabricate the cookie. Watcher access signals cannot be removed through this endpoint.
 
 ## Privacy and internal analytics
 

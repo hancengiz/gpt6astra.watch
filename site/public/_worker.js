@@ -11,7 +11,6 @@ const COUNTRIES = new Set(
    "TN TO TR TT TV TW TZ UA UG UM US UY UZ VA VC VE VG VI VN VU WF WS YE YT ZA ZM ZW XK").split(" ")
 );
 
-const DEDUPE_WINDOW_MS = 6 * 3600 * 1000; // one web report per ip/country per 6h
 const DAILY_IP_CAP = 12;                  // max web reports per ip per 24h
 const ACTIVE_WINDOW_MS = 25 * 60 * 1000; // two missed 10-minute heartbeats + grace
 const DAILY_WATCHER_CAP = 50;             // anonymous installation ids per ip/day
@@ -41,6 +40,35 @@ function clientIp(request) {
   return request.headers.get("cf-connecting-ip") ||
          request.headers.get("x-forwarded-for")?.split(",")[0]?.trim() ||
          "0.0.0.0";
+}
+
+function randomToken() {
+  const bytes = crypto.getRandomValues(new Uint8Array(24));
+  return [...bytes].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
+function undoCookieName(country) {
+  return `astra_report_${country}`;
+}
+
+function undoCookie(request, country, token, maxAge = 365 * 24 * 3600) {
+  const secure = new URL(request.url).protocol === "https:" ? "; Secure" : "";
+  return `${undoCookieName(country)}=${token}; Path=/; Max-Age=${maxAge}; HttpOnly${secure}; SameSite=Strict`;
+}
+
+function readCookie(request, name) {
+  for (const part of (request.headers.get("cookie") || "").split(";")) {
+    const separator = part.indexOf("=");
+    if (separator < 0) continue;
+    if (part.slice(0, separator).trim() === name) {
+      return part.slice(separator + 1).trim();
+    }
+  }
+  return null;
+}
+
+function isLocalHostname(hostname) {
+  return hostname === "localhost" || hostname === "127.0.0.1" || hostname === "[::1]";
 }
 
 function statusFor(webIps, watcherIps) {
@@ -148,6 +176,8 @@ async function handleApi(request, env, url) {
       name: "gpt6astra.watch",
       endpoints: {
         "POST /api/report   {country}": "manual web report",
+        "DELETE /api/report {country}": "undo this browser's manual web report",
+        "GET  /api/location": "current request country hint; no storage",
         "GET  /api/summary": "per-country rollout and active-monitoring rollup",
         "GET  /api/status?country=XX": "single country — what region watchers poll",
         "GET  /api/feed?after=ID": "recent availability reports",
@@ -157,6 +187,13 @@ async function handleApi(request, env, url) {
     });
   }
 
+
+  if (path === "/api/location" && request.method === "GET") {
+    const country = String(
+      request.cf?.country || request.headers.get("cf-ipcountry") || ""
+    ).toUpperCase();
+    return json({ country: COUNTRIES.has(country) ? country : null });
+  }
 
   if (path === "/api/report" && request.method === "POST") {
     const body = await readJsonBody(request);
@@ -169,34 +206,150 @@ async function handleApi(request, env, url) {
 
     const country = String(body.country || "").toUpperCase();
     if (!COUNTRIES.has(country)) return bad("unknown country code");
-
     if (!secret) return bad("service not configured", 503);
-    const ipHash = await hashIp(clientIp(request), secret);
-    const now = Date.now();
 
+    const ipHash = await hashIp(clientIp(request), secret);
+    const existingToken = readCookie(request, undoCookieName(country));
+    const now = Date.now();
     const [dupe, cap] = await db.batch([
       db.prepare(
-        `SELECT 1 FROM reports
-         WHERE ip_hash = ?1 AND country = ?2 AND created_at > ?3`
-      ).bind(ipHash, country, now - DEDUPE_WINDOW_MS),
+        `SELECT id, undo_hash FROM reports
+         WHERE ip_hash = ?1 AND country = ?2 AND source = 'web'`
+      ).bind(ipHash, country),
       db.prepare(
         `SELECT COUNT(*) AS n FROM reports
-         WHERE ip_hash = ?1 AND created_at > ?2`
+         WHERE ip_hash = ?1 AND source = 'web' AND created_at > ?2`
       ).bind(ipHash, now - 24 * 3600 * 1000),
     ]);
-    if (cap.results[0]?.n >= DAILY_IP_CAP) return bad("too many reports", 429);
+
     if (dupe.results.length > 0) {
+      await db.prepare(
+        `INSERT OR IGNORE INTO report_claims (ip_hash, country, created_at)
+         VALUES (?1, ?2, ?3)`
+      ).bind(ipHash, country, now).run();
+
+      let canUndo = false;
+      let issuedToken = null;
+      if (/^[a-f0-9]{48}$/.test(existingToken || "")) {
+        const existingUndoHash = await hashIp(`undo:${existingToken}`, secret);
+        canUndo = dupe.results.some((row) => row.undo_hash === existingUndoHash);
+      } else if (dupe.results.every((row) => row.undo_hash == null)) {
+        issuedToken = randomToken();
+        const claimedUndoHash = await hashIp(`undo:${issuedToken}`, secret);
+        await db.prepare(
+          `UPDATE reports SET undo_hash = ?1
+           WHERE ip_hash = ?2 AND country = ?3 AND source = 'web' AND undo_hash IS NULL`
+        ).bind(claimedUndoHash, ipHash, country).run();
+        canUndo = true;
+      }
+
       const { countries } = await rollup(db);
       const c = countries[country] || { status: "none" };
-      return json({ ok: true, deduped: true, country, status: c.status });
+      return json(
+        {
+          ok: true,
+          deduped: true,
+          can_undo: canUndo,
+          country,
+          status: c.status,
+          message: canUndo
+            ? "You already reported Astra for this country. This browser can undo it below—thanks for keeping the constellation honest ✦"
+            : "You already reported Astra for this country. One star per network—keep the constellation honest ✦",
+        },
+        issuedToken ? { headers: { "set-cookie": undoCookie(request, country, issuedToken) } } : {}
+      );
+    }
+    if ((cap.results[0]?.n ?? 0) >= DAILY_IP_CAP) return bad("too many reports", 429);
+
+    const claimed = await db.prepare(
+      `INSERT OR IGNORE INTO report_claims (ip_hash, country, created_at)
+       VALUES (?1, ?2, ?3)`
+    ).bind(ipHash, country, now).run();
+    if ((claimed.meta?.changes ?? 0) === 0) {
+      const { countries } = await rollup(db);
+      const c = countries[country] || { status: "none" };
+      return json({
+        ok: true,
+        deduped: true,
+        can_undo: false,
+        country,
+        status: c.status,
+        message: "You already reported Astra for this country. One star per network—keep the constellation honest ✦",
+      });
     }
 
-    await db.prepare(
-      `INSERT INTO reports (country, source, ip_hash, created_at) VALUES (?1, 'web', ?2, ?3)`
-    ).bind(country, ipHash, now).run();
+    const undoToken = randomToken();
+    const undoHash = await hashIp(`undo:${undoToken}`, secret);
+    try {
+      await db.prepare(
+        `INSERT INTO reports (country, source, ip_hash, undo_hash, created_at)
+         VALUES (?1, 'web', ?2, ?3, ?4)`
+      ).bind(country, ipHash, undoHash, now).run();
+    } catch (err) {
+      await db.prepare(
+        `DELETE FROM report_claims WHERE ip_hash = ?1 AND country = ?2`
+      ).bind(ipHash, country).run();
+      throw err;
+    }
 
     const { countries, totals } = await rollup(db);
-    return json({ ok: true, country, ...countries[country], totals });
+    return json(
+      { ok: true, can_undo: true, country, ...countries[country], totals },
+      { headers: { "set-cookie": undoCookie(request, country, undoToken) } }
+    );
+  }
+
+  if (path === "/api/report" && request.method === "DELETE") {
+    const body = await readJsonBody(request);
+    if (!body) return bad("invalid JSON body");
+    const country = String(body.country || "").toUpperCase();
+    if (!COUNTRIES.has(country)) return bad("unknown country code");
+    if (!secret) return bad("service not configured", 503);
+
+    const undoToken = readCookie(request, undoCookieName(country));
+    if (!undoToken || !/^[a-f0-9]{48}$/.test(undoToken)) {
+      return bad("undo cookie not found", 403);
+    }
+    const undoHash = await hashIp(`undo:${undoToken}`, secret);
+    const owned = await db.prepare(
+      `SELECT DISTINCT ip_hash FROM reports
+       WHERE country = ?1 AND source = 'web' AND undo_hash = ?2`
+    ).bind(country, undoHash).all();
+
+    let removedCount = 0;
+    if (owned.results.length > 0) {
+      const results = await db.batch([
+        db.prepare(
+          `DELETE FROM reports
+           WHERE country = ?1 AND source = 'web' AND undo_hash = ?2`
+        ).bind(country, undoHash),
+        ...owned.results.map((row) =>
+          db.prepare(
+            `DELETE FROM report_claims
+             WHERE ip_hash = ?1 AND country = ?2
+               AND NOT EXISTS (
+                 SELECT 1 FROM reports
+                 WHERE source = 'web' AND ip_hash = ?1 AND country = ?2
+               )`
+          ).bind(row.ip_hash, country)
+        ),
+      ]);
+      removedCount = results[0].meta?.changes ?? 0;
+    }
+
+    const { countries, totals } = await rollup(db);
+    const c = countries[country] || { status: "none" };
+    return json(
+      {
+        ok: true,
+        removed: removedCount > 0,
+        removed_count: removedCount,
+        country,
+        status: c.status,
+        totals,
+      },
+      { headers: { "set-cookie": undoCookie(request, country, "", 0) } }
+    );
   }
 
   if (path === "/api/summary" && request.method === "GET") {
@@ -338,7 +491,7 @@ async function handleApi(request, env, url) {
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
-    if (url.protocol !== "https:") {
+    if (url.protocol !== "https:" && !isLocalHostname(url.hostname)) {
       url.protocol = "https:";
       return Response.redirect(url.toString(), 308);
     }

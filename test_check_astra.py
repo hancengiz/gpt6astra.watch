@@ -185,5 +185,42 @@ class AstraWatchTests(unittest.TestCase):
 
         self.assertEqual((2, 1, 2, 1, 1), row)
 
+    def test_report_undo_migration_preserves_legacy_rows(self):
+        import sqlite3
+
+        database = sqlite3.connect(":memory:")
+        database.executescript(
+            """
+            CREATE TABLE reports (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              country TEXT NOT NULL,
+              source TEXT NOT NULL,
+              ip_hash TEXT NOT NULL,
+              created_at INTEGER NOT NULL
+            );
+            INSERT INTO reports (country, source, ip_hash, created_at) VALUES
+              ('TR', 'web', 'shared-ip', 1),
+              ('TR', 'web', 'shared-ip', 2),
+              ('US', 'watcher', 'watcher-id', 3);
+            """
+        )
+        before = database.execute(
+            "SELECT id, country, source, ip_hash, created_at FROM reports ORDER BY id"
+        ).fetchall()
+
+        migration = (
+            Path(__file__).parent / "site" / "migrations" / "0003_report_undo.sql"
+        ).read_text()
+        database.executescript(migration)
+
+        after = database.execute(
+            "SELECT id, country, source, ip_hash, created_at FROM reports ORDER BY id"
+        ).fetchall()
+        claims = database.execute(
+            "SELECT ip_hash, country FROM report_claims"
+        ).fetchall()
+        self.assertEqual(before, after)
+        self.assertEqual([("shared-ip", "TR")], claims)
+
 if __name__ == "__main__":
     unittest.main()

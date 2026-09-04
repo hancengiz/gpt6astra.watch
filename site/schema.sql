@@ -8,6 +8,7 @@ CREATE TABLE IF NOT EXISTS reports (
   country    TEXT    NOT NULL,                              -- ISO 3166-1 alpha-2 (+ XK)
   source     TEXT    NOT NULL DEFAULT 'web' CHECK (source IN ('web','watcher')),
   ip_hash    TEXT    NOT NULL,                              -- HMAC-SHA256(salt, ip)
+  undo_hash  TEXT,                                          -- HMAC of browser-only undo token
   created_at INTEGER NOT NULL                               -- epoch ms
 );
 
@@ -16,6 +17,14 @@ CREATE INDEX IF NOT EXISTS idx_reports_ip_country  ON reports(ip_hash, country, 
 CREATE INDEX IF NOT EXISTS idx_reports_ip_time     ON reports(ip_hash, created_at);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_watcher_access_report
   ON reports(ip_hash) WHERE source = 'watcher';
+CREATE INDEX IF NOT EXISTS idx_reports_undo_hash ON reports(undo_hash);
+
+CREATE TABLE IF NOT EXISTS report_claims (
+  ip_hash    TEXT    NOT NULL,
+  country    TEXT    NOT NULL,
+  created_at INTEGER NOT NULL,
+  PRIMARY KEY (ip_hash, country)
+);
 
 CREATE TABLE IF NOT EXISTS watchers (
   id                 INTEGER PRIMARY KEY AUTOINCREMENT,

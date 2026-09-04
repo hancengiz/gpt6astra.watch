@@ -240,14 +240,18 @@ else requestAnimationFrame(starLoop);
 
 /* ---------------------------------------------------------------- state */
 
+const initialCountry = detectCountry();
+
 const state = {
   countries: [],        // [{iso, name, feature, centroid, d}]
   byIso: new Map(),
   summary: { countries: {}, totals: { lit: 0, reported: 0, rumored: 0, reports: 0, monitoring: 0 } },
   selected: null,
-  myCountry: detectCountry(),
+  myCountry: initialCountry,
+  detectedCountry: initialCountry,
   lastFeedId: 0,
   tickEvents: [],       // [{type:'report'|'lit', cc, name, ts}]
+  scriptOnly: localStorage.getItem("astra-script-only") === "1",
   pathGen: null,
   projection: null,
 };
@@ -318,16 +322,51 @@ async function loadWorld() {
   }
 }
 
+async function refineDetectedCountry() {
+  try {
+    const response = await fetch("/api/location", { cache: "no-store" });
+    if (!response.ok) return;
+    const data = await response.json();
+    if (data.country && state.byIso.has(data.country)) {
+      state.detectedCountry = data.country;
+      state.myCountry = data.country;
+    }
+  } catch {
+    // Timezone detection remains the offline fallback.
+  }
+}
+
+function statusFromCountry(data) {
+  if (!data) return "none";
+  if (!state.scriptOnly) return data.status || "none";
+  const watcherReports = data.watcher ?? 0;
+  if (watcherReports >= 2) return "live";
+  if (watcherReports === 1) return "rumored";
+  return "none";
+}
+
 function statusOf(iso) {
-  return state.summary.countries[iso]?.status || "none";
+  return statusFromCountry(state.summary.countries[iso]);
 }
 
 function paintCountries() {
   for (const c of state.countries) {
     if (!c.iso || !c.node) continue;
-    const st = statusOf(c.iso);
-    c.node.classList.remove("rumored", "reported", "live");
-    if (st !== "none") c.node.classList.add(st);
+    const data = state.summary.countries[c.iso] || {};
+    const status = statusOf(c.iso);
+    c.node.classList.remove("rumored", "reported", "live", "self-reported", "script-reported");
+    if (status !== "none") {
+      c.node.classList.add(status);
+    } else {
+      c.node.classList.remove("ignite");
+    }
+    if (status !== "none" && status !== "live" &&
+        (data.watcher ?? 0) > 0 && (state.scriptOnly || !(data.web ?? 0))) {
+      c.node.classList.add("script-reported");
+    } else if (status !== "none" && status !== "live" &&
+               (data.web ?? 0) > 0 && !(data.watcher ?? 0)) {
+      c.node.classList.add("self-reported");
+    }
   }
 }
 
@@ -386,11 +425,22 @@ function ignite(iso) {
 const counters = { lit: $("#c-lit"), monitoring: $("#c-monitoring"), reports: $("#c-reports") };
 const prevTotals = { lit: null, monitoring: null, reports: null };
 
+function viewTotals() {
+  if (!state.scriptOnly) return state.summary.totals;
+  let lit = 0;
+  let reports = 0;
+  for (const country of Object.values(state.summary.countries)) {
+    reports += country.watcher ?? 0;
+    if ((country.watcher ?? 0) >= 2) lit++;
+  }
+  return { ...state.summary.totals, lit, reports };
+}
+
 function paintCounters() {
-  const t = state.summary.totals;
+  const totals = viewTotals();
   for (const key of ["lit", "monitoring", "reports"]) {
     const node = counters[key];
-    const val = t[key] ?? 0;
+    const val = totals[key] ?? 0;
     if (prevTotals[key] !== null && prevTotals[key] !== val) {
       node.classList.remove("bump");
       void node.offsetWidth;
@@ -399,7 +449,9 @@ function paintCounters() {
     prevTotals[key] = val;
     node.textContent = val.toLocaleString();
   }
-  document.title = t.lit > 0 ? `(${t.lit} lit) gpt6astra.watch` : "gpt6astra.watch — is it in your sky yet?";
+  document.title = totals.lit > 0
+    ? `(${totals.lit} lit) gpt6astra.watch`
+    : "gpt6astra.watch — is it in your sky yet?";
 }
 
 /* ---------------------------------------------------------------- panel */
@@ -421,18 +473,22 @@ function closePanel() {
   for (const node of gCountries.children) node.classList.remove("selected");
 }
 
-const STATUS_COPY = {
-  live: "✦ Lit",
-  reported: "Reported",
-  rumored: "Rumored",
-  none: "Still dark",
-};
+function statusLabel(data, status = statusFromCountry(data)) {
+  if (status === "live") return "✦ Lit";
+  if (status === "none") return "Still dark";
+  if (state.scriptOnly || ((data.watcher ?? 0) > 0 && !(data.web ?? 0))) {
+    return "Script reported";
+  }
+  if ((data.web ?? 0) > 0 && !(data.watcher ?? 0)) return "Self reported";
+  return "Reported";
+}
 
 function renderPanel() {
   const iso = state.selected;
   const c = state.byIso.get(iso);
   if (!c || !iso) return;
   const d = state.summary.countries[iso] || {};
+  const viewStatus = statusOf(iso);
   const reported = localStorage.getItem(`astra-reported-${iso}`);
 
   panel.innerHTML = "";
@@ -452,10 +508,10 @@ function renderPanel() {
   const statusLine = document.createElement("div");
   statusLine.className = "status-line";
   const chip = document.createElement("span");
-  chip.className = `status-chip ${d.status || "none"}`;
-  chip.textContent = STATUS_COPY[d.status || "none"];
+  chip.className = `status-chip ${viewStatus}`;
+  chip.textContent = statusLabel(d, viewStatus);
   statusLine.append(chip);
-  if (d.status === "live" && d.first_at) {
+  if (viewStatus === "live" && d.first_at && !state.scriptOnly) {
     const since = document.createElement("span");
     since.textContent = `first seen ${relTime(d.first_at)}`;
     statusLine.append(since);
@@ -463,10 +519,11 @@ function renderPanel() {
 
   const stats = document.createElement("div");
   stats.className = "stats";
+  const visibleReports = state.scriptOnly ? (d.watcher ?? 0) : (d.reports ?? 0);
   stats.innerHTML = `
-    <div><b>${(d.reports ?? 0).toLocaleString()}</b><span>reports</span></div>
+    <div><b>${visibleReports.toLocaleString()}</b><span>${state.scriptOnly ? "script reports" : "reports"}</span></div>
     <div><b>${(d.monitoring ?? 0).toLocaleString()}</b><span>monitoring now</span></div>
-    <div><b>${d.web ?? 0}</b><span>distinct reporters</span></div>
+    <div><b>${d.web ?? 0}</b><span>${state.scriptOnly ? "web reports hidden" : "distinct reporters"}</span></div>
     <div><b>${d.watcher ?? 0}</b><span>account signals</span></div>`;
 
   const actions = document.createElement("div");
@@ -476,7 +533,12 @@ function renderPanel() {
     const thanks = document.createElement("div");
     thanks.className = "thanks";
     thanks.textContent = "You're counted. Welcome to the constellation ✦";
-    actions.append(thanks);
+    const undo = document.createElement("button");
+    undo.className = "btn btn-ghost";
+    undo.type = "button";
+    undo.textContent = "Reported by mistake? Undo";
+    undo.onclick = () => undoReport(iso, undo);
+    actions.append(thanks, undo);
   } else {
     const btn = document.createElement("button");
     btn.className = "btn btn-primary";
@@ -494,13 +556,32 @@ function renderPanel() {
 
   const hint = document.createElement("p");
   hint.className = "hint";
-  hint.textContent = "The map is crowd signal — anyone can light a country. For proof on your own account, use a watcher (it checks the Codex model picker).";
+  hint.textContent = state.scriptOnly
+    ? "Showing only access reports sent by consented skill/script watchers. Manual web reports are hidden."
+    : "The map is crowd signal — anyone can light a country. For proof on your own account, use a watcher (it checks the Codex model picker).";
 
   panel.append(close, flag, h2, statusLine, stats, actions, hint);
   panel.hidden = false;
 }
 
+function confirmCountryMismatch(iso) {
+  const detectedIso = state.detectedCountry;
+  if (!detectedIso || detectedIso === iso) return true;
+  const detectedName = state.byIso.get(detectedIso)?.name || detectedIso;
+  const reportName = state.byIso.get(iso)?.name || iso;
+  const questions = [
+    `Tiny telescope check: your current sky looks like ${detectedName}, but you're reporting ${reportName}. Did Astra really land there?`,
+    `Constellation double-check: ${reportName}, not ${detectedName} — are you absolutely sure?`,
+    `Final launch key: promise this ${reportName} report is real and you'll help keep the community sky honest?`,
+  ];
+  return questions.every((question) => window.confirm(question));
+}
+
 async function submitReport(iso, btn) {
+  if (!confirmCountryMismatch(iso)) {
+    toast("Launch aborted — no stars were harmed ✦");
+    return;
+  }
   btn.disabled = true;
   btn.textContent = "Lighting it up…";
   try {
@@ -511,10 +592,15 @@ async function submitReport(iso, btn) {
     });
     const data = await res.json();
     if (!res.ok) throw new Error(data.error || "failed");
-    localStorage.setItem(`astra-reported-${iso}`, String(Date.now()));
     if (data.deduped) {
-      toast("Already counted — you're part of this star ✦");
+      if (data.can_undo) {
+        localStorage.setItem(`astra-reported-${iso}`, String(Date.now()));
+      } else {
+        localStorage.removeItem(`astra-reported-${iso}`);
+      }
+      toast(data.message || "You already reported this country ✦");
     } else {
+      localStorage.setItem(`astra-reported-${iso}`, String(Date.now()));
       burstAt(iso);
       ignite(iso);
       toast("Lit ✦ thanks for reporting");
@@ -525,6 +611,29 @@ async function submitReport(iso, btn) {
     toast("Could not report — try again in a moment");
     btn.disabled = false;
     btn.textContent = "✦ I got Astra";
+  }
+}
+
+async function undoReport(iso, btn) {
+  btn.disabled = true;
+  btn.textContent = "Correcting the sky…";
+  try {
+    const res = await fetch("/api/report", {
+      method: "DELETE",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ country: iso }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || "failed");
+    localStorage.removeItem(`astra-reported-${iso}`);
+    toast(data.removed
+      ? "Report removed — thanks for keeping the constellation honest ✦"
+      : "That report was already gone.");
+    await refreshSummary(true);
+  } catch (err) {
+    toast("Could not undo from this browser — the private undo key may be missing");
+    btn.disabled = false;
+    btn.textContent = "Reported by mistake? Undo";
   }
 }
 
@@ -559,7 +668,7 @@ function paintYouChip() {
   chip.hidden = false;
   const c = state.byIso.get(state.myCountry) || null;
   $("#you-text").innerHTML = c
-    ? `Your sky: <strong>${flagOf(c.iso)} ${c.name}</strong> — ${STATUS_COPY[statusOf(c.iso)].toLowerCase()}`
+    ? `Your sky: <strong>${flagOf(c.iso)} ${c.name}</strong> — ${statusLabel(state.summary.countries[c.iso] || {}, statusOf(c.iso)).toLowerCase()}`
     : `Pick your sky:`;
 }
 
@@ -573,7 +682,10 @@ function pushTick(event) {
 
 function paintTicker() {
   const track = $("#ticker-track");
-  const items = state.tickEvents.map((e) => {
+  const visibleEvents = state.scriptOnly
+    ? state.tickEvents.filter((event) => event.type === "report" && event.source === "watcher")
+    : state.tickEvents;
+  const items = visibleEvents.map((e) => {
     if (e.type === "lit") {
       return `<span class="tick lit-event"><span class="t-flag">${flagOf(e.cc)}</span>` +
         `<strong>${e.name}</strong> just lit up ✦ <time>${relTime(e.ts)}</time></span>`;
@@ -600,8 +712,9 @@ async function refreshSummary(force = false) {
 
   // detect newly lit countries while the tab was open
   for (const [iso, d] of Object.entries(data.countries)) {
-    const was = prev.countries[iso]?.status || "none";
-    if (d.status === "live" && was !== "live") {
+    const was = statusFromCountry(prev.countries[iso]);
+    const next = statusFromCountry(d);
+    if (next === "live" && was !== "live") {
       const c = state.byIso.get(iso);
       ignite(iso);
       burstAt(iso);
@@ -643,8 +756,22 @@ addEventListener("resize", () => {
   resizeTimer = setTimeout(layoutMap, 120);
 });
 
+const scriptOnlyToggle = $("#script-only");
+scriptOnlyToggle.checked = state.scriptOnly;
+scriptOnlyToggle.addEventListener("change", () => {
+  state.scriptOnly = scriptOnlyToggle.checked;
+  localStorage.setItem("astra-script-only", state.scriptOnly ? "1" : "0");
+  paintCountries();
+  renderStars();
+  renderConstellation();
+  paintCounters();
+  if (state.selected) renderPanel();
+  paintTicker();
+});
+
 (async () => {
   await loadWorld();
+  await refineDetectedCountry();
   layoutMap();
   paintCountries();
   paintYouChip();
