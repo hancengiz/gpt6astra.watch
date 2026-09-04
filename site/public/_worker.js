@@ -338,6 +338,10 @@ async function handleApi(request, env, url) {
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
+    if (url.protocol !== "https:") {
+      url.protocol = "https:";
+      return Response.redirect(url.toString(), 308);
+    }
     if (url.pathname === "/SKILL.md" && request.method === "GET") {
       const asset = await env.ASSETS.fetch(request);
       if (!asset.ok) return asset;
