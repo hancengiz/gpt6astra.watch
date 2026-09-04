@@ -85,7 +85,7 @@ class AstraWatchTests(unittest.TestCase):
             with self.assertRaises(argparse.ArgumentTypeError):
                 check_astra.country_argument(bad)
 
-    def test_report_to_map_posts_country_only(self):
+    def test_send_watcher_event_posts_protocol_payload(self):
         import io
         import urllib.request
 
@@ -107,19 +107,31 @@ class AstraWatchTests(unittest.TestCase):
         original = urllib.request.urlopen
         urllib.request.urlopen = fake_urlopen
         try:
-            result = check_astra.report_to_map("TR", "https://example/api", 12.0)
+            result = check_astra.send_watcher_event(
+                "TR",
+                "random-installation-id-123456",
+                "heartbeat",
+                "https://example/api",
+                12.0,
+            )
         finally:
             urllib.request.urlopen = original
 
         self.assertEqual({"ok": True}, result)
         self.assertEqual(
-            {"country": "TR", "source": "watcher", "nickname": ""},
+            {
+                "country": "TR",
+                "watcher_id": "random-installation-id-123456",
+                "event": "heartbeat",
+                "mode": "account",
+                "nickname": "",
+            },
             json.loads(captured["data"]),
         )
         self.assertEqual("application/json", captured["headers"]["Content-type"])
         self.assertEqual(12.0, captured["timeout"])
 
-    def test_report_to_map_is_never_fatal(self):
+    def test_send_watcher_event_is_never_fatal(self):
         import urllib.request
 
         def failing_urlopen(request, timeout):
@@ -128,11 +140,46 @@ class AstraWatchTests(unittest.TestCase):
         original = urllib.request.urlopen
         urllib.request.urlopen = failing_urlopen
         try:
-            result = check_astra.report_to_map("TR", "https://example/api", 5.0)
+            result = check_astra.send_watcher_event(
+                "TR",
+                "random-installation-id-123456",
+                "access",
+                "https://example/api",
+                5.0,
+            )
         finally:
             urllib.request.urlopen = original
 
         self.assertIsNone(result)
+
+    def test_private_funnel_does_not_multiply_skill_requests_by_installations(self):
+        import sqlite3
+
+        database = sqlite3.connect(":memory:")
+        schema = (Path(__file__).parent / "site" / "schema.sql").read_text()
+        database.executescript(schema)
+        database.execute(
+            "INSERT INTO skill_requests "
+            "(country, ip_hash, first_requested_at, last_requested_at, request_count) "
+            "VALUES ('TR', 'same-ip', 1, 2, 2)"
+        )
+        database.executemany(
+            "INSERT INTO watchers "
+            "(country, watcher_hash, ip_hash, mode, started_at, last_seen_at, "
+            "completed_at, access_detected_at, completion_reason, created_at) "
+            "VALUES (?, ?, 'same-ip', 'account', 1, 2, ?, ?, ?, 1)",
+            [
+                ("TR", "watcher-one", 2, 2, "account_access"),
+                ("TR", "watcher-two", None, None, None),
+            ],
+        )
+
+        row = database.execute(
+            "SELECT skill_requests, unique_skill_requesters, watcher_installations, "
+            "completed_watchers, account_accesses FROM internal_funnel"
+        ).fetchone()
+
+        self.assertEqual((2, 1, 2, 1, 1), row)
 
 if __name__ == "__main__":
     unittest.main()

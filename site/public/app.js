@@ -243,7 +243,7 @@ else requestAnimationFrame(starLoop);
 const state = {
   countries: [],        // [{iso, name, feature, centroid, d}]
   byIso: new Map(),
-  summary: { countries: {}, totals: { lit: 0, reported: 0, rumored: 0, reports: 0, watchers: 0 } },
+  summary: { countries: {}, totals: { lit: 0, reported: 0, rumored: 0, reports: 0, monitoring: 0 } },
   selected: null,
   myCountry: detectCountry(),
   lastFeedId: 0,
@@ -346,7 +346,7 @@ function renderStars() {
 }
 
 function starScale(iso) {
-  // bigger stars for rollouts confirmed by watchers
+  // bigger stars for rollouts backed by account-access signals
   const c = state.summary.countries[iso];
   if (c?.watcher >= 2) return 1.35;
   if (c?.watcher >= 1) return 1.15;
@@ -383,12 +383,12 @@ function ignite(iso) {
 
 /* ---------------------------------------------------------------- counters */
 
-const counters = { lit: $("#c-lit"), watchers: $("#c-watchers"), reports: $("#c-reports") };
-const prevTotals = { lit: null, watchers: null, reports: null };
+const counters = { lit: $("#c-lit"), monitoring: $("#c-monitoring"), reports: $("#c-reports") };
+const prevTotals = { lit: null, monitoring: null, reports: null };
 
 function paintCounters() {
   const t = state.summary.totals;
-  for (const key of ["lit", "watchers", "reports"]) {
+  for (const key of ["lit", "monitoring", "reports"]) {
     const node = counters[key];
     const val = t[key] ?? 0;
     if (prevTotals[key] !== null && prevTotals[key] !== val) {
@@ -465,9 +465,9 @@ function renderPanel() {
   stats.className = "stats";
   stats.innerHTML = `
     <div><b>${(d.reports ?? 0).toLocaleString()}</b><span>reports</span></div>
-    <div><b>${(d.watchers ?? 0).toLocaleString()}</b><span>stargazers waiting</span></div>
+    <div><b>${(d.monitoring ?? 0).toLocaleString()}</b><span>monitoring now</span></div>
     <div><b>${d.web ?? 0}</b><span>distinct reporters</span></div>
-    <div><b>${d.watcher ?? 0}</b><span>watcher-verified</span></div>`;
+    <div><b>${d.watcher ?? 0}</b><span>account signals</span></div>`;
 
   const actions = document.createElement("div");
   actions.className = "actions";
@@ -507,7 +507,7 @@ async function submitReport(iso, btn) {
     const res = await fetch("/api/report", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ country: iso, source: "web", nickname: "" }),
+      body: JSON.stringify({ country: iso, nickname: "" }),
     });
     const data = await res.json();
     if (!res.ok) throw new Error(data.error || "failed");
@@ -580,7 +580,7 @@ function paintTicker() {
     }
     return `<span class="tick"><span class="t-flag">${flagOf(e.cc)}</span>` +
       `someone got Astra in <strong>${e.name}</strong>` +
-      `${e.source === "watcher" ? " · watcher-verified" : ""} <time>${relTime(e.ts)}</time></span>`;
+      `${e.source === "watcher" ? " · account signal" : ""} <time>${relTime(e.ts)}</time></span>`;
   });
   if (!items.length) {
     items.push('<span class="tick">waiting for the first reports… be the star that breaks the dark ✦</span>');

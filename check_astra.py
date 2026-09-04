@@ -10,6 +10,7 @@ import json
 import os
 from pathlib import Path
 import queue
+import secrets
 import shutil
 import subprocess
 import sys
@@ -22,8 +23,8 @@ import urllib.request
 
 DEFAULT_MODEL = "gpt-6-astra"
 DEFAULT_TIMEOUT_SECONDS = 30.0
-DEFAULT_REPORT_URL = "https://gpt6astra.watch/api/report"
-STATE_VERSION = 1
+DEFAULT_WATCHER_URL = "https://gpt6astra.watch/api/watchers"
+STATE_VERSION = 2
 
 
 class WatcherError(RuntimeError):
@@ -45,6 +46,7 @@ def default_state(target_model: str) -> dict[str, Any]:
         "consecutive_errors": 0,
         "error_notification_sent": False,
         "last_error": None,
+        "watcher_id": None,
     }
 
 
@@ -72,6 +74,7 @@ def load_state(path: Path, target_model: str) -> dict[str, Any]:
 
     state = default_state(target_model)
     state.update(loaded)
+    state["version"] = STATE_VERSION
     return state
 
 
@@ -389,10 +392,24 @@ def print_result(payload: dict[str, Any], *, error: bool = False) -> None:
     )
 
 
-def report_to_map(country: str, endpoint: str, timeout: float) -> dict[str, Any] | None:
-    """Best-effort report to the public gpt6astra.watch map. Never raises."""
+def send_watcher_event(
+    country: str,
+    watcher_id: str,
+    event: str,
+    endpoint: str,
+    timeout: float,
+    *,
+    mode: str = "account",
+) -> dict[str, Any] | None:
+    """Best-effort anonymous watcher signal. Never raises."""
     payload = json.dumps(
-        {"country": country, "source": "watcher", "nickname": ""}
+        {
+            "country": country,
+            "watcher_id": watcher_id,
+            "event": event,
+            "mode": mode,
+            "nickname": "",
+        }
     ).encode("utf-8")
     request = urllib.request.Request(
         endpoint,
@@ -404,7 +421,10 @@ def report_to_map(country: str, endpoint: str, timeout: float) -> dict[str, Any]
         with urllib.request.urlopen(request, timeout=timeout) as response:
             body = response.read(4096)
     except OSError as exc:
-        print_result({"status": "map_report_failed", "error": str(exc)}, error=True)
+        print_result(
+            {"status": "watcher_signal_failed", "event": event, "error": str(exc)},
+            error=True,
+        )
         return None
     try:
         decoded = json.loads(body)
@@ -428,6 +448,21 @@ def check_once(args: argparse.Namespace) -> int:
             }
         )
         return 0
+    monitoring_signal = None
+    watcher_id = state.get("watcher_id")
+    if args.share_country and not args.no_notify:
+        if not watcher_id:
+            watcher_id = secrets.token_urlsafe(24)
+            state["watcher_id"] = watcher_id
+            save_state(state_path, state)
+        monitoring_signal = send_watcher_event(
+            args.share_country,
+            watcher_id,
+            "heartbeat",
+            args.watcher_url,
+            min(args.timeout, 15.0),
+        )
+
 
     try:
         codex_binary = resolve_codex_binary(args.codex_bin)
@@ -484,6 +519,7 @@ def check_once(args: argparse.Namespace) -> int:
                 "model": args.model,
                 "checked_at": checked_at,
                 "picker_models_seen": len(models),
+                "monitoring_signal": monitoring_signal,
             }
         )
         return 0
@@ -499,10 +535,20 @@ def check_once(args: argparse.Namespace) -> int:
                 "model": args.model,
                 "checked_at": checked_at,
                 "notification": "suppressed",
-                "map_report": "suppressed" if args.report_country else None,
+                "sharing": "suppressed" if args.share_country else None,
             }
         )
         return 0
+    access_signal = None
+    if args.share_country:
+        access_signal = send_watcher_event(
+            args.share_country,
+            watcher_id,
+            "access",
+            args.watcher_url,
+            min(args.timeout, 15.0),
+        )
+
 
     try:
         send_desktop_notification(
@@ -522,14 +568,8 @@ def check_once(args: argparse.Namespace) -> int:
             },
             error=True,
         )
+        return 1
 
-    map_report = None
-    if args.report_country:
-        map_report = report_to_map(
-            args.report_country,
-            args.report_url,
-            min(args.timeout, 15.0),
-        )
 
     state["notified_at"] = checked_at
     save_state(state_path, state)
@@ -539,7 +579,7 @@ def check_once(args: argparse.Namespace) -> int:
             "model": args.model,
             "checked_at": checked_at,
             "notification": "sent",
-            "map_report": map_report,
+            "access_signal": access_signal,
         }
     )
     return 0
@@ -578,16 +618,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="send a harmless test notification without querying Codex",
     )
     parser.add_argument(
-        "--report-country",
+        "--share-country",
         type=country_argument,
         metavar="CC",
-        help="after detecting availability, report this ISO 3166-1 alpha-2 country "
-        "to the public gpt6astra.watch map (only the country code is sent)",
+        help="after explicit consent, anonymously share active-monitoring heartbeats "
+        "and the access timestamp for this ISO 3166-1 alpha-2 country",
     )
     parser.add_argument(
-        "--report-url",
-        default=DEFAULT_REPORT_URL,
-        help="endpoint used by --report-country (default: %(default)s)",
+        "--watcher-url",
+        default=DEFAULT_WATCHER_URL,
+        help="endpoint used by --share-country (default: %(default)s)",
     )
     return parser.parse_args(argv)
 

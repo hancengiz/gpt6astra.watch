@@ -3,8 +3,10 @@
 Astra Watch has two parts:
 
 - **[gpt6astra.watch](https://gpt6astra.watch)** — a crowd-watched cosmic
-  rollout map. People light up their country when GPT-6 Astra lands; agents can
-  join the stargazers by reading the public [`SKILL.md`](site/public/SKILL.md).
+  rollout map. People light up their country when GPT-6 Astra lands; active
+  anonymous watchers appear in the public monitoring counter. The served
+  [`SKILL.md`](site/public/SKILL.md) injects the request country so an agent can
+  confirm it and ask one yes/no consent question before installing anything.
 - **`check_astra.py`** — a ground-truth local checker for the currently
   signed-in Codex account. It sends one desktop notification when
   `gpt-6-astra` becomes picker-visible.
@@ -35,7 +37,9 @@ State is stored at `~/.local/state/astra-watch/state.json` with mode `0600`.
 After the success notification is sent, later runs exit without querying Codex,
 preventing duplicate alerts. Authentication or network failures are never
 treated as evidence that the model is unavailable. After three consecutive
-failures, the watcher sends one health notification.
+failures, the watcher sends one health notification. With explicit consent,
+`--share-country CC` sends a stable anonymous heartbeat on each scheduled run
+and one idempotent access event when Astra appears.
 
 ## User systemd timer
 
@@ -72,18 +76,34 @@ again. Desktop notifications require an active graphical session.
 
 The complete deployment output lives in `site/public/`:
 
-- `index.html`, `style.css`, `app.js` — the cosmic map, live counters, ticker,
-  country panel, and reporting flow.
-- `_worker.js` — Pages advanced-mode Worker for `/api/*`.
+- `index.html`, `style.css`, `app.js` — the cosmic map, active-monitoring
+  counter, ticker, country panel, and reporting flow.
+- `_worker.js` — Pages advanced-mode Worker for `/api/*` plus the personalized
+  `/SKILL.md` response.
 - `SKILL.md` and `skill/` — raw agent instructions plus the human-facing
   "Join the Stargazers" page.
 - `scripts/check_astra.py` — the downloadable copy of the local checker. Keep
   it byte-for-byte in sync with the root `check_astra.py`.
 
-The API stores reports and stargazer registrations in D1. Three distinct web
-reporters or two distinct watcher reports mark a country as lit. Repeated
-reports from one salted IP hash are deduplicated; the hash salt is a Cloudflare
-secret and is never committed.
+The API stores reports and consented anonymous watcher sessions in D1. A
+watcher counts as active for 25 minutes after its latest heartbeat and stops
+counting when it sends an access or country-completion event. Start and
+completion times preserve anonymous wait-duration statistics. Three distinct
+web reporters or two distinct account-access signals mark a country as lit.
+
+Every `/SKILL.md` GET also records country, first/last request time, request
+count, and a salted one-way IP hash for private funnel analytics. The public
+API never returns these analytics. Administrators can query the D1-only view:
+
+```bash
+cd site
+npx wrangler d1 execute astra-watch --remote \
+  --command "SELECT * FROM internal_funnel ORDER BY unique_skill_requesters DESC"
+```
+
+The funnel compares unique skill requesters, watcher installations, completed
+watchers, and account-access outcomes by country. Salted hashes permit an
+approximate request-to-install join without retaining raw IPs.
 
 ## Local website development
 
@@ -112,6 +132,14 @@ npx wrangler deploy -c wrangler.worker.toml
 
 The Worker uses the production `astra-watch` D1 database in EEUR. The
 `IP_HASH_SECRET` value exists only as a Worker secret.
+Apply upgrades to an existing deployment before deploying new Worker code:
+
+```bash
+cd site
+npx wrangler d1 execute astra-watch \
+  --file migrations/0002_active_monitoring.sql --remote
+```
+
 
 When the Git-integrated Pages project below is ready:
 
@@ -168,8 +196,9 @@ openssl rand -hex 32 | npx wrangler pages secret put IP_HASH_SECRET \
   --project-name gpt6astra-watch
 ```
 
-The value is stored only in Cloudflare. Production report endpoints fail closed
-with HTTP 503 until it is present; public status reads remain available.
+The value is stored only in Cloudflare. Production report and watcher-signal
+endpoints fail closed with HTTP 503 until it is present; public status reads
+and the skill itself remain available.
 
 ### 4. Direct local-folder deploy
 

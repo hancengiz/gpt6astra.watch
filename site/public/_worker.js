@@ -11,9 +11,10 @@ const COUNTRIES = new Set(
    "TN TO TR TT TV TW TZ UA UG UM US UY UZ VA VC VE VG VI VN VU WF WS YE YT ZA ZM ZW XK").split(" ")
 );
 
-const DEDUPE_WINDOW_MS = 6 * 3600 * 1000;   // one report per ip per country per 6h
-const DAILY_IP_CAP = 12;                    // max reports per ip per 24h (troll brake)
-const WATCHER_DEDUPE_MS = 24 * 3600 * 1000; // watcher registrations per ip per 24h
+const DEDUPE_WINDOW_MS = 6 * 3600 * 1000; // one web report per ip/country per 6h
+const DAILY_IP_CAP = 12;                  // max web reports per ip per 24h
+const ACTIVE_WINDOW_MS = 25 * 60 * 1000; // two missed 10-minute heartbeats + grace
+const DAILY_WATCHER_CAP = 50;             // anonymous installation ids per ip/day
 
 const json = (data, init = {}) =>
   new Response(JSON.stringify(data), {
@@ -61,8 +62,8 @@ async function readJsonBody(request) {
   }
 }
 
-async function rollup(db) {
-  const [reports, watchers] = await db.batch([
+async function rollup(db, now = Date.now()) {
+  const [reports, activeWatchers, history] = await db.batch([
     db.prepare(
       `SELECT country,
               COUNT(DISTINCT CASE WHEN source='web'     THEN ip_hash END) AS web_ips,
@@ -73,13 +74,36 @@ async function rollup(db) {
        FROM reports GROUP BY country`
     ),
     db.prepare(
-      `SELECT country, COUNT(DISTINCT ip_hash) AS waiting
-       FROM watchers GROUP BY country`
+      `SELECT country, COUNT(DISTINCT watcher_hash) AS monitoring
+       FROM watchers
+       WHERE watcher_hash IS NOT NULL
+         AND completed_at IS NULL
+         AND last_seen_at > ?1
+       GROUP BY country`
+    ).bind(now - ACTIVE_WINDOW_MS),
+    db.prepare(
+      `SELECT COUNT(*) AS completed,
+              SUM(CASE WHEN access_detected_at IS NOT NULL THEN 1 ELSE 0 END) AS access_detected,
+              AVG(CASE WHEN completed_at >= started_at THEN completed_at - started_at END) AS average_wait_ms
+       FROM watchers
+       WHERE watcher_hash IS NOT NULL AND completed_at IS NOT NULL`
     ),
   ]);
 
   const countries = {};
-  let totals = { lit: 0, reported: 0, rumored: 0, reports: 0, watchers: 0 };
+  const historyRow = history.results?.[0] || {};
+  const totals = {
+    lit: 0,
+    reported: 0,
+    rumored: 0,
+    reports: 0,
+    monitoring: 0,
+    completed: historyRow.completed ?? 0,
+    access_detected: historyRow.access_detected ?? 0,
+    average_wait_ms: historyRow.average_wait_ms == null
+      ? null
+      : Math.round(historyRow.average_wait_ms),
+  };
 
   for (const row of reports.results || []) {
     const status = statusFor(row.web_ips, row.watcher_ips);
@@ -88,7 +112,7 @@ async function rollup(db) {
       web: row.web_ips,
       watcher: row.watcher_ips,
       reports: row.total,
-      watchers: 0,
+      monitoring: 0,
       first_at: row.first_at,
       last_at: row.last_at,
     };
@@ -97,16 +121,16 @@ async function rollup(db) {
     else if (status === "reported") totals.reported++;
     else if (status === "rumored") totals.rumored++;
   }
-  for (const row of watchers.results || []) {
+  for (const row of activeWatchers.results || []) {
     if (!countries[row.country]) {
       countries[row.country] = {
         status: "none", web: 0, watcher: 0, reports: 0,
-        watchers: row.waiting, first_at: null, last_at: null,
+        monitoring: row.monitoring, first_at: null, last_at: null,
       };
     } else {
-      countries[row.country].watchers = row.waiting;
+      countries[row.country].monitoring = row.monitoring;
     }
-    totals.watchers += row.waiting;
+    totals.monitoring += row.monitoring;
   }
   return { countries, totals };
 }
@@ -123,14 +147,16 @@ async function handleApi(request, env, url) {
     return json({
       name: "gpt6astra.watch",
       endpoints: {
-        "POST /api/report   {country, source?}": "report Astra availability (source: web|watcher)",
-        "GET  /api/summary": "full per-country rollup",
-        "GET  /api/status?country=XX": "single country — what watchers poll",
-        "GET  /api/feed?after=ID": "recent report events",
-        "POST /api/watchers {country}": "register a watcher (waiting counter)",
+        "POST /api/report   {country}": "manual web report",
+        "GET  /api/summary": "per-country rollout and active-monitoring rollup",
+        "GET  /api/status?country=XX": "single country — what region watchers poll",
+        "GET  /api/feed?after=ID": "recent availability reports",
+        "POST /api/watchers {country, watcher_id, event, mode}":
+          "anonymous heartbeat/access/completion signal",
       },
     });
   }
+
 
   if (path === "/api/report" && request.method === "POST") {
     const body = await readJsonBody(request);
@@ -142,7 +168,6 @@ async function handleApi(request, env, url) {
     }
 
     const country = String(body.country || "").toUpperCase();
-    const source = body.source === "watcher" ? "watcher" : "web";
     if (!COUNTRIES.has(country)) return bad("unknown country code");
 
     if (!secret) return bad("service not configured", 503);
@@ -167,8 +192,8 @@ async function handleApi(request, env, url) {
     }
 
     await db.prepare(
-      `INSERT INTO reports (country, source, ip_hash, created_at) VALUES (?1, ?2, ?3, ?4)`
-    ).bind(country, source, ipHash, now).run();
+      `INSERT INTO reports (country, source, ip_hash, created_at) VALUES (?1, 'web', ?2, ?3)`
+    ).bind(country, ipHash, now).run();
 
     const { countries, totals } = await rollup(db);
     return json({ ok: true, country, ...countries[country], totals });
@@ -183,7 +208,7 @@ async function handleApi(request, env, url) {
     const country = (url.searchParams.get("country") || "").toUpperCase();
     if (!COUNTRIES.has(country)) return bad("unknown country code");
     const { countries, totals } = await rollup(db);
-    const c = countries[country] || { status: "none", reports: 0, watchers: 0 };
+    const c = countries[country] || { status: "none", reports: 0, monitoring: 0 };
     return json({
       country,
       status: c.status === "live" ? "live" : "pending",
@@ -191,10 +216,13 @@ async function handleApi(request, env, url) {
       reports: c.reports ?? 0,
       web_reporters: c.web ?? 0,
       watcher_reporters: c.watcher ?? 0,
-      watchers_waiting: c.watchers ?? 0,
+      stargazers_monitoring: c.monitoring ?? 0,
       first_seen: c.first_at ? new Date(c.first_at).toISOString() : null,
       last_seen: c.last_at ? new Date(c.last_at).toISOString() : null,
-      totals: { countries_lit: totals.lit, watchers_waiting: totals.watchers },
+      totals: {
+        countries_lit: totals.lit,
+        stargazers_monitoring: totals.monitoring,
+      },
     }, { cache: "public, max-age=60" });
   }
 
@@ -215,29 +243,93 @@ async function handleApi(request, env, url) {
     if (typeof body.nickname === "string" && body.nickname.trim() !== "") {
       return json({ ok: true, ignored: true });
     }
+
     const country = String(body.country || "").toUpperCase();
+    const watcherId = String(body.watcher_id || "");
+    const event = String(body.event || "");
+    const mode = body.mode === "region" ? "region" : "account";
     if (!COUNTRIES.has(country)) return bad("unknown country code");
-
-    if (!secret) return bad("service not configured", 503);
-    const ipHash = await hashIp(clientIp(request), secret);
-    const now = Date.now();
-    const dupe = await db.prepare(
-      `SELECT 1 FROM watchers WHERE ip_hash = ?1 AND created_at > ?2`
-    ).bind(ipHash, now - WATCHER_DEDUPE_MS).first();
-
-    let waiting, total;
-    if (!dupe) {
-      await db.prepare(
-        `INSERT INTO watchers (country, ip_hash, created_at) VALUES (?1, ?2, ?3)`
-      ).bind(country, ipHash, now).run();
+    if (!/^[A-Za-z0-9_-]{20,128}$/.test(watcherId)) {
+      return bad("watcher_id must be a random 20–128 character token");
     }
-    const res = await db.batch([
-      db.prepare(`SELECT COUNT(DISTINCT ip_hash) AS n FROM watchers WHERE country = ?1`).bind(country),
-      db.prepare(`SELECT COUNT(DISTINCT ip_hash) AS n FROM watchers`),
-    ]);
-    waiting = res[0].results[0]?.n ?? 0;
-    total = res[1].results[0]?.n ?? 0;
-    return json({ ok: true, deduped: Boolean(dupe), country, watchers_waiting: waiting, watchers_total: total });
+    if (!["heartbeat", "access", "country_live"].includes(event)) {
+      return bad("event must be heartbeat, access, or country_live");
+    }
+    if (event === "access" && mode !== "account") {
+      return bad("access events require account mode");
+    }
+    if (event === "country_live" && mode !== "region") {
+      return bad("country_live events require region mode");
+    }
+    if (!secret) return bad("service not configured", 503);
+
+    const watcherHash = await hashIp(`watcher:${watcherId}`, secret);
+    const ipHash = await hashIp(`ip:${clientIp(request)}`, secret);
+    const now = Date.now();
+    const existing = await db.prepare(
+      `SELECT watcher_hash FROM watchers WHERE watcher_hash = ?1`
+    ).bind(watcherHash).first();
+    if (!existing) {
+      const cap = await db.prepare(
+        `SELECT COUNT(*) AS n FROM watchers
+         WHERE ip_hash = ?1 AND created_at > ?2`
+      ).bind(ipHash, now - 24 * 3600 * 1000).first();
+      if ((cap?.n ?? 0) >= DAILY_WATCHER_CAP) return bad("too many watcher ids", 429);
+    }
+
+    const completedAt = event === "heartbeat" ? null : now;
+    const accessAt = event === "access" ? now : null;
+    const completionReason =
+      event === "access" ? "account_access" :
+      event === "country_live" ? "country_live" : null;
+
+    await db.prepare(
+      `INSERT INTO watchers (
+         country, watcher_hash, ip_hash, mode, started_at, last_seen_at,
+         completed_at, access_detected_at, completion_reason, created_at
+       ) VALUES (?1, ?2, ?3, ?4, ?5, ?5, ?6, ?7, ?8, ?5)
+       ON CONFLICT DO UPDATE SET
+         country = excluded.country,
+         ip_hash = excluded.ip_hash,
+         mode = excluded.mode,
+         last_seen_at = excluded.last_seen_at,
+         completed_at = COALESCE(watchers.completed_at, excluded.completed_at),
+         access_detected_at = COALESCE(watchers.access_detected_at, excluded.access_detected_at),
+         completion_reason = COALESCE(watchers.completion_reason, excluded.completion_reason)`
+    ).bind(
+      country, watcherHash, ipHash, mode, now,
+      completedAt, accessAt, completionReason
+    ).run();
+
+    if (event === "access") {
+      await db.prepare(
+        `INSERT OR IGNORE INTO reports (country, source, ip_hash, created_at)
+         VALUES (?1, 'watcher', ?2, ?3)`
+      ).bind(country, watcherHash, now).run();
+    }
+
+    const session = await db.prepare(
+      `SELECT started_at, last_seen_at, completed_at, access_detected_at, completion_reason
+       FROM watchers WHERE watcher_hash = ?1`
+    ).bind(watcherHash).first();
+    const { countries, totals } = await rollup(db, now);
+    return json({
+      ok: true,
+      country,
+      event,
+      mode,
+      monitoring: session.completed_at == null,
+      monitoring_in_country: countries[country]?.monitoring ?? 0,
+      monitoring_total: totals.monitoring,
+      started_at: session.started_at,
+      last_seen_at: session.last_seen_at,
+      completed_at: session.completed_at,
+      access_detected_at: session.access_detected_at,
+      completion_reason: session.completion_reason,
+      wait_ms: session.completed_at == null
+        ? null
+        : Math.max(0, session.completed_at - session.started_at),
+    });
   }
 
   return bad("not found", 404);
@@ -246,6 +338,68 @@ async function handleApi(request, env, url) {
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
+    if (url.pathname === "/SKILL.md" && request.method === "GET") {
+      const asset = await env.ASSETS.fetch(request);
+      if (!asset.ok) return asset;
+
+      const country = String(
+        request.cf?.country || request.headers.get("cf-ipcountry") || ""
+      ).toUpperCase();
+      const analyticsSecret = env.IP_HASH_SECRET ||
+        (env.CF_PAGES_BRANCH === "local" ? "dev-only-insecure-salt" : null);
+      if (COUNTRIES.has(country) && analyticsSecret) {
+        try {
+          const ipHash = await hashIp(`ip:${clientIp(request)}`, analyticsSecret);
+          const now = Date.now();
+          await env.DB.prepare(
+            `INSERT INTO skill_requests (
+               country, ip_hash, first_requested_at, last_requested_at, request_count
+             ) VALUES (?1, ?2, ?3, ?3, 1)
+             ON CONFLICT(country, ip_hash) DO UPDATE SET
+               last_requested_at = excluded.last_requested_at,
+               request_count = skill_requests.request_count + 1`
+          ).bind(country, ipHash, now).run();
+        } catch (err) {
+          console.error("skill request analytics error", err);
+        }
+      }
+      let detected;
+      if (COUNTRIES.has(country)) {
+        let name = country;
+        try {
+          name = new Intl.DisplayNames(["en"], { type: "region" }).of(country) || country;
+        } catch {
+          // ISO code remains a usable fallback.
+        }
+        detected =
+          `> **Detected location for this installation:** ${name} (${country}), based on the request country.\n` +
+          `> This SKILL.md request records the country, timestamp, and a salted one-way IP hash for private funnel analytics; the raw IP and counts are not published.\n` +
+          `> Before creating, downloading, or scheduling a watcher script, tell the user this detected location and ask: ` +
+          `"You appear to be in ${name} (${country}). Would you like to contribute anonymously to the map while this watcher is active and when Astra reaches your account? ` +
+          `This sends the country, a random installation ID, heartbeat timestamps, and the access timestamp; no account name, hostname, or raw IP. Yes or no?" ` +
+          `If the location is wrong, use the user's correction. Do not install anything until the user answers.`;
+      } else {
+        detected =
+          `> **Location detection was unavailable for this installation.** ` +
+          `Before creating, downloading, or scheduling a watcher script, ask for the user's country and then ask the same explicit yes/no consent question described below. ` +
+          `Do not install anything until the user answers.`;
+      }
+
+      const source = await asset.text();
+      const metadataEnd = source.indexOf("\n---\n", 3);
+      const personalized = metadataEnd >= 0
+        ? `${source.slice(0, metadataEnd + 5)}\n${detected}\n\n${source.slice(metadataEnd + 5)}`
+        : `${detected}\n\n${source}`;
+      const headers = new Headers(asset.headers);
+      headers.set("content-type", "text/markdown; charset=utf-8");
+      headers.set("cache-control", "private, no-store");
+      headers.delete("content-length");
+      headers.delete("etag");
+      return new Response(personalized, {
+        status: asset.status,
+        headers,
+      });
+    }
     if (url.pathname === "/api" || url.pathname.startsWith("/api/")) {
       try {
         return await handleApi(request, env, url);
