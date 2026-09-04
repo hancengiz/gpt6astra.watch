@@ -8,7 +8,7 @@ compatibility_date = "2026-09-01"
 [[d1_databases]]
 binding = "DB"
 database_name = "astra-watch"
-database_id = "REPLACE_WITH_YOUR_D1_ID"
+database_id = "d836f510-3a99-4251-901c-7022afad5568"
 
 # The only secret (salt for IP hashing) is set out-of-band, never committed:
 #   npx wrangler pages secret put IP_HASH_SECRET
