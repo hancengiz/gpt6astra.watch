@@ -414,7 +414,10 @@ def send_watcher_event(
     request = urllib.request.Request(
         endpoint,
         data=payload,
-        headers={"content-type": "application/json"},
+        headers={
+            "content-type": "application/json",
+            "user-agent": "Astra-Watch/1.0 (+https://gpt6astra.watch)",
+        },
         method="POST",
     )
     try:

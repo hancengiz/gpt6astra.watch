@@ -129,6 +129,10 @@ class AstraWatchTests(unittest.TestCase):
             json.loads(captured["data"]),
         )
         self.assertEqual("application/json", captured["headers"]["Content-type"])
+        self.assertEqual(
+            "Astra-Watch/1.0 (+https://gpt6astra.watch)",
+            captured["headers"]["User-agent"],
+        )
         self.assertEqual(12.0, captured["timeout"])
 
     def test_send_watcher_event_is_never_fatal(self):
