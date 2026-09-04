@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>gpt6astra.watch — is it in your sky yet?</title>
+<meta name="description" content="The crowd-watched rollout of GPT-6 Astra. Watch the world light up region by region, report yours, or let your AI agent watch for you.">
+<meta property="og:title" content="gpt6astra.watch — is it in your sky yet?">
+<meta property="og:description" content="The crowd-watched rollout of GPT-6 Astra. Watch the sky light up, report your region, or let your agent watch for you.">
+<meta property="og:type" content="website">
+<meta property="og:url" content="https://gpt6astra.watch/">
+<meta name="twitter:card" content="summary">
+<link rel="icon" href="/favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+
+<canvas id="starfield" aria-hidden="true"></canvas>
+<div class="aurora" aria-hidden="true"></div>
+
+<header class="masthead">
+  <a class="wordmark" href="/">gpt6astra<span>.watch</span></a>
+  <nav class="topnav">
+    <a href="/skill">Join the Stargazers <span class="nav-note">(get the script)</span></a>
+    <a href="/SKILL.md">SKILL.md</a>
+    <a href="https://github.com/hancengiz/gpt6astra.watch" rel="noopener">GitHub</a>
+  </nav>
+</header>
+
+<main class="sky-wrap">
+  <svg id="map" role="img" aria-label="World map showing where GPT-6 Astra has been reported"></svg>
+
+  <section class="hero">
+    <h1>Is it in <em>your</em> sky yet?</h1>
+    <p class="sub">GPT-6&nbsp;Astra is rolling out account by account, region by region.
+       This is the crowd-watched sky: light yours up when it lands, or let your agent watch for you.</p>
+
+    <div class="counters" aria-live="polite">
+      <div class="counter"><span id="c-lit" class="num">–</span><label>countries lit</label></div>
+      <div class="counter"><span id="c-watchers" class="num">–</span><label>stargazers waiting</label></div>
+      <div class="counter"><span id="c-reports" class="num">–</span><label>reports</label></div>
+    </div>
+
+    <div class="you-chip" id="you-chip" hidden>
+      <span id="you-text"></span>
+      <select id="country-select" aria-label="Choose your country"></select>
+      <button id="you-got" class="btn btn-primary btn-small" type="button">✦ I got Astra</button>
+    </div>
+  </section>
+
+  <div class="legend" aria-hidden="true">
+    <span><i class="dot rumored"></i>rumored</span>
+    <span><i class="dot reported"></i>reported</span>
+    <span><i class="dot live"></i>lit ✦</span>
+  </div>
+
+  <aside class="panel" id="panel" hidden aria-live="polite"></aside>
+</main>
+
+<footer class="ticker-wrap" aria-label="Recent reports">
+  <div class="ticker-label">live</div>
+  <div class="ticker-clip"><div class="ticker-track" id="ticker-track"></div></div>
+</footer>
+
+<footer class="foot">
+  <span>Not affiliated with OpenAI. Astra is their star; this is just the sky watching it rise.</span>
+  <span>We store country, timestamp and a salted one-way IP hash — nothing else. <a href="/skill">How stargazing works</a></span>
+</footer>
+
+<div id="toast" role="status" hidden></div>
+
+<script type="module" src="/app.js"></script>
+</body>
+</html>

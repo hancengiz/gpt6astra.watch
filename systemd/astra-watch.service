@@ -1,0 +1,15 @@
+[Unit]
+Description=Check Codex account for GPT-6 Astra access
+Documentation=https://learn.chatgpt.com/docs/app-server
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/code/astra-watch
+ExecStart=/usr/bin/python3 %h/code/astra-watch/check_astra.py
+Environment=PYTHONUNBUFFERED=1
+NoNewPrivileges=true
+PrivateTmp=true
+TimeoutStartSec=45
+Nice=10

@@ -1,0 +1,103 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Join the Stargazers — gpt6astra.watch</title>
+<meta name="description" content="Give SKILL.md to your AI agent and it will set up a scheduled watcher that notifies you when GPT-6 Astra reaches your account.">
+<link rel="icon" href="/favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="/style.css">
+<style>
+  body { overflow: auto; height: auto; min-height: 100dvh; display: block; }
+  .page { max-width: 760px; margin: 0 auto; padding: 28px 22px 80px; }
+  .back { color: var(--dim); text-decoration: none; font-size: 14px; }
+  .back:hover { color: var(--accent); }
+  h1 { font-family: var(--display); font-weight: 400; font-size: clamp(34px, 6vw, 56px); margin-top: 22px; line-height: 1.05; }
+  h1 em { font-style: italic; color: var(--accent); }
+  .lede { color: var(--dim); font-size: 16px; line-height: 1.6; margin-top: 14px; max-width: 56ch; }
+  .steps { margin-top: 34px; display: grid; gap: 14px; }
+  .step { border: 1px solid var(--line); border-radius: 16px; padding: 18px 20px; background: rgba(9,13,30,.6); }
+  .step .n { font-family: var(--mono); font-size: 12px; color: var(--accent); letter-spacing: .12em; text-transform: uppercase; }
+  .step h3 { font-size: 17px; font-weight: 600; margin: 6px 0 6px; }
+  .step p { color: var(--dim); font-size: 14px; line-height: 1.6; }
+  .copyblock { position: relative; margin-top: 10px; }
+  .copyblock pre {
+    font-family: var(--mono); font-size: 13px; line-height: 1.65;
+    background: rgba(4,7,16,.9); border: 1px solid var(--line);
+    border-radius: 12px; padding: 16px 56px 16px 16px;
+    overflow-x: auto; color: #c9d4ff; white-space: pre-wrap; word-break: break-word;
+  }
+  .copybtn {
+    position: absolute; top: 10px; right: 10px;
+    background: rgba(126,162,255,.12); color: var(--ink);
+    border: 1px solid var(--line); border-radius: 8px;
+    font-size: 12px; padding: 6px 10px; cursor: pointer;
+  }
+  .copybtn:hover { background: rgba(126,162,255,.24); }
+  .privacy { margin-top: 30px; font-size: 13px; color: var(--faint); line-height: 1.6; }
+  .privacy a { color: var(--dim); }
+  .bigcta { margin-top: 26px; }
+</style>
+</head>
+<body>
+<canvas id="starfield" aria-hidden="true"></canvas>
+<div class="aurora" aria-hidden="true"></div>
+
+<div class="page">
+  <a class="back" href="/">← back to the sky</a>
+  <h1>Let your agent <em>watch the sky</em> for you.</h1>
+  <p class="lede">No accounts, no apps. Hand the skill file to any coding agent — Claude Code, Codex,
+  Cursor, whatever reads instructions — and it installs a scheduled watcher on your machine that
+  pings you the moment GPT-6&nbsp;Astra lands.</p>
+
+  <div class="steps">
+    <div class="step">
+      <div class="n">step 1</div>
+      <h3>Copy the prompt</h3>
+      <p>Paste it into your agent chat.</p>
+      <div class="copyblock">
+        <button class="copybtn" type="button" data-copy="prompt">copy</button>
+        <pre id="prompt">Install the astra-watch skill from https://gpt6astra.watch/SKILL.md
+and set up a scheduled watcher that notifies me when GPT-6 Astra
+becomes available on my account. Ask me for my country, and ask me
+before reporting anything to the public map.</pre>
+      </div>
+    </div>
+
+    <div class="step">
+      <div class="n">step 2</div>
+      <h3>Or fetch the skill directly</h3>
+      <p>The agent can pull it itself — the file is plain agent-readable markdown.</p>
+      <div class="copyblock">
+        <button class="copybtn" type="button" data-copy="curl">copy</button>
+        <pre id="curl">curl -fsSL https://gpt6astra.watch/SKILL.md</pre>
+      </div>
+    </div>
+
+    <div class="step">
+      <div class="n">what happens</div>
+      <h3>Your agent will</h3>
+      <p>
+        Check the live status of your country · pick the best watcher for your setup
+        (Codex account ground-truth if you have the CLI, otherwise the crowd-status watcher) ·
+        schedule it every 10 minutes — systemd on Linux, launchd on macOS,
+        Task Scheduler on Windows · fire a desktop notification when Astra lands.
+      </p>
+    </div>
+
+    <div class="step">
+      <div class="n">privacy</div>
+      <h3>What leaves your machine</h3>
+      <p>Your two-letter country code, if you say yes to report-back. That's it — no identifiers,
+      no accounts. The map stores country + timestamp + a salted one-way IP hash.
+      Everything is open source: <a href="https://github.com/hancengiz/gpt6astra.watch">github.com/hancengiz/gpt6astra.watch</a></p>
+    </div>
+  </div>
+
+  <a class="btn btn-primary bigcta" href="/SKILL.md">Read SKILL.md yourself →</a>
+  <p class="privacy">Not affiliated with OpenAI. GPT-6 Astra is their model; this is just the sky watching it rise.</p>
+</div>
+
+<script type="module" src="/skill/skill.js"></script>
+</body>
+</html>
